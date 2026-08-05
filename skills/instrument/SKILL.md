@@ -13,10 +13,13 @@ step 4 checks.
 
 `references/` holds one file per page of the Convergent documentation, all of
 them in that one directory. Each file says what its page covers and gives the
-page's path in this repository. Open a reference file at the step that
-sends you to it, and do not read one before you need it. Read the page itself
-where that repository is on disk. Where it is not, the reference file and the
-steps below are what you have.
+page's path in the SDK repository,
+[github.com/convergent-technologies/convergent-sdk](https://github.com/convergent-technologies/convergent-sdk).
+Open a reference file at the step that sends you to it, and do not read one
+before you need it. Read the page itself where that repository is on disk, and
+`git clone https://github.com/convergent-technologies/convergent-sdk` fetches
+it where it is not. Without the pages, the reference file and the steps below
+are what you have.
 
 | File | Page | Answers |
 | --- | --- | --- |
@@ -48,6 +51,8 @@ Read the agent's code and put this list in one message to the user:
 
 Say which of them you intend to wrap, and ask the user to strike anything they
 want left out. One message, not an interview. Then instrument what survives.
+When no user can answer, such as a batch or CI run, instrument the full list
+and put the plan and its assumptions in your final report instead.
 
 Cover all four kinds by default. Wrapping only the entry point records an agent
 span and one model call, which supports almost no comparison between runs.
@@ -78,8 +83,9 @@ at `references/index.md`, has the same command for a project with neither. Then
 call `init()` once at startup, ahead of any model call and any OpenTelemetry
 setup the app does itself, with the arguments on the API reference page, at
 `references/reference-api.md`. Derive `release` from
-something the project already has, e.g. `git rev-parse --short HEAD`, and never
-leave a placeholder in their code.
+something the project already has: `git rev-parse --short HEAD` in a git
+checkout, or a build id or image tag the environment already carries where
+there is none. Never leave a placeholder in their code.
 
 Bring these to the user rather than choosing:
 
@@ -165,6 +171,10 @@ called over plain HTTP, write the spans yourself with the calls in
   because frameworks read the tool's name, signature, and docstring to build the
   schema they send to the model.
 - Give each agent a name that holds still across runs, like a class name.
+- Record a fact under the spelling the Attribute support page lists, at
+  `references/reference-attributes.md`. A key those tables do not list stays on
+  the stored span, and nothing computed reads it: it becomes no token count, no
+  cost, no first-class field.
 
 ## 4. Verify
 

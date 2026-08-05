@@ -8,4 +8,4 @@ turn a coverage plan into a check, and the `references/` files. Send a user here
 when they ask how to install this skill, hand it to a teammate, or run it from a
 tool other than Claude Code.
 
-Page: `python/docs/agent-skill.md` in this SDK's documentation tree.
+Page: `python/docs/agent-skill.md` in https://github.com/convergent-technologies/convergent-sdk.

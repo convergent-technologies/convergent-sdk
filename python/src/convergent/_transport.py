@@ -14,7 +14,7 @@ from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
 from opentelemetry.util.types import Attributes
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from opentelemetry.exporter.otlp.proto.http import Compression
     from requests import Session
@@ -32,6 +32,9 @@ class AuthRejectingSession:
         self._rejected = False
         self._reported_too_large = False
         self.headers = session.headers
+
+    def is_rejected(self) -> bool:
+        return self._rejected
 
     def post(self, *args: Any, **kwargs: Any) -> Any:
         if self._rejected:
@@ -129,12 +132,28 @@ def lost_spans() -> int:
 
 
 class _LossCountingExporter(SpanExporter):
-    """Counts the spans the wrapped exporter failed to deliver."""
+    """Counts the spans the wrapped exporter failed to deliver.
 
-    def __init__(self, exporter: SpanExporter) -> None:
+    ``rejected`` is how a refused credential becomes a counted loss: once the
+    collector answers 401 or 403, :class:`AuthRejectingSession` reports success
+    to the exporter so it neither retries nor logs per batch, and this wrapper
+    is the only layer that still knows the batch never landed.
+    """
+
+    def __init__(self, exporter: SpanExporter, rejected: Callable[[], bool] | None) -> None:
         self._exporter = exporter
+        self._rejected = rejected
+
+    def _credentials_rejected(self) -> bool:
+        return self._rejected is not None and self._rejected()
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        if self._credentials_rejected():
+            # The post-export check below counts a withheld batch too; this
+            # branch only skips the pointless encode and post once the key is
+            # known dead.
+            _record_lost(len(spans))
+            return SpanExportResult.FAILURE
         try:
             result = self._exporter.export(spans)
         except Exception:
@@ -142,6 +161,12 @@ class _LossCountingExporter(SpanExporter):
             raise
         if result is not SpanExportResult.SUCCESS:
             _record_lost(len(spans))
+            return result
+        if self._credentials_rejected():
+            # The rejection happened on this batch: the session answered the
+            # exporter with a success so nothing retries, but nothing landed.
+            _record_lost(len(spans))
+            return SpanExportResult.FAILURE
         return result
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
@@ -171,7 +196,9 @@ _meters = _CountingMeterProvider()
 _metrics_gate = threading.Lock()
 
 
-def batch_processor(exporter: SpanExporter) -> BatchSpanProcessor:
+def batch_processor(
+    exporter: SpanExporter, *, rejected: Callable[[], bool] | None = None
+) -> BatchSpanProcessor:
     """A batch processor whose dropped spans are counted by :func:`dropped_spans`.
 
     ``meter_provider`` is the only supported way to receive those counts, and
@@ -185,7 +212,7 @@ def batch_processor(exporter: SpanExporter) -> BatchSpanProcessor:
     and a box can carry an older one. There, fall back to a processor with no drop-count
     telemetry rather than let the whole trace be lost.
     """
-    wrapped = _LossCountingExporter(exporter)
+    wrapped = _LossCountingExporter(exporter, rejected)
     with _metrics_gate:
         previous = os.environ.get(_INTERNAL_METRICS)
         os.environ[_INTERNAL_METRICS] = "true"
@@ -223,12 +250,13 @@ def build_processor(*, api_key: str, endpoint: str) -> SpanProcessor:
     warn_on_conflicting_auth_header()
     session = Session()
     session.headers.update({"Authorization": f"Bearer {api_key}"})
+    guard = AuthRejectingSession(session)
     exporter = OTLPSpanExporter(
         endpoint=f"{endpoint.rstrip('/')}/v1/traces",
-        session=cast("Session", AuthRejectingSession(session)),
+        session=cast("Session", guard),
         compression=_compression(),
     )
-    return batch_processor(exporter)
+    return batch_processor(exporter, rejected=guard.is_rejected)
 
 
 def _compression() -> Compression:

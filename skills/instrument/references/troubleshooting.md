@@ -11,4 +11,4 @@ trace, then agents missing or multiplying, traces with no version, missing
 prompts, a dropped attribute, a run with no model call in it, and spans that were
 recorded but never delivered.
 
-Page: `python/docs/troubleshooting.md` in this SDK's documentation tree.
+Page: `python/docs/troubleshooting.md` in https://github.com/convergent-technologies/convergent-sdk.

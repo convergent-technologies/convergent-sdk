@@ -10,4 +10,4 @@ A combined OpenLLMetry and OpenInference registry table lists the libraries
 covered without a row of their own, and the page closes with what to do when no
 package covers your library.
 
-Page: `python/docs/integrations/index.md` in this SDK's documentation tree.
+Page: `python/docs/integrations/index.md` in https://github.com/convergent-technologies/convergent-sdk.

@@ -10,4 +10,4 @@ the fields of `Status`, `Report`, `Note`, `SpanHandle`, `TraceRef`, and
 `FlushResult`. It also holds the table mapping each operation string to the span
 name it produces.
 
-Page: `python/docs/reference/api.md` in this SDK's documentation tree.
+Page: `python/docs/reference/api.md` in https://github.com/convergent-technologies/convergent-sdk.

@@ -16,6 +16,11 @@ a spans file that cannot be opened raises `OSError`.
 Each returned type is documented as a field table. A dash in the allowed values
 column means the type is the only constraint on the value.
 
+## __version__
+
+The installed package's version string, `"0.0.0"` in a source checkout with no
+`convergent-sdk` distribution installed.
+
 ## init()
 
 ```python

@@ -8,4 +8,4 @@ attributes onto your agent span and opens no model span of its own. It says to
 append to `litellm.callbacks` rather than assign to it, and lists what a
 `litellm_request` span carries, including litellm's own price for the call.
 
-Page: `python/docs/integrations/litellm.md` in this SDK's documentation tree.
+Page: `python/docs/integrations/litellm.md` in https://github.com/convergent-technologies/convergent-sdk.

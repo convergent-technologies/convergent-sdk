@@ -7,4 +7,4 @@ three span shapes a chain arrives as: one per chain suffixed `.workflow`, one pe
 step named `execute_task`, and one per model call suffixed `.chat`. It also says
 that a chain built with `|` arrives named `RunnableSequence` until you name it.
 
-Page: `python/docs/integrations/langchain.md` in this SDK's documentation tree.
+Page: `python/docs/integrations/langchain.md` in https://github.com/convergent-technologies/convergent-sdk.

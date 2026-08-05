@@ -7,6 +7,7 @@ import convergent
 import convergent as sdk
 
 EXPECTED = [
+    "__version__",
     "init",
     "check",
     "observe",
@@ -83,6 +84,14 @@ def test_the_otel_submodule_is_reachable_both_ways() -> None:
         check=True,
     )
     assert result.stdout.strip() == str(EXPECTED_OTEL)
+
+
+def test_version_is_a_nonempty_string() -> None:
+    """The installed distribution's version, or ``0.0.0`` in a source checkout
+    that has no convergent-sdk distribution to ask."""
+    assert isinstance(convergent.__version__, str)
+    assert convergent.__version__
+    assert convergent.__version__ is sdk.__version__
 
 
 def test_importing_convergent_does_not_load_pydantic_ai() -> None:

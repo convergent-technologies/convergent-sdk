@@ -254,10 +254,11 @@ flush drained was delivered. The exporter's error log says which batch failed.
 OpenTelemetry threw away because a queue was full and the ones an export failed to
 deliver. The queue is bounded at 2048 and `OTEL_BSP_MAX_QUEUE_SIZE` raises it.
 
-Rejected credentials are the one loss these numbers do not carry. Once the
-collector has answered 401 or 403 the SDK stops sending, and the batches it holds
-back after that are not counted. The `disabled because the collector rejected its
-credentials` line is what reports it, and `check()` prints the status code.
+Rejected credentials count the same way. Once the collector has answered 401 or
+403 the SDK stops sending, and the refused batch and every batch it holds back
+after that turn `ok` off and land in `dropped`. The `disabled because the
+collector rejected its credentials` line names the cause, and `check()` prints
+the status code.
 
 ## Seeing what you are sending
 
