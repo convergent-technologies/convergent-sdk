@@ -35,7 +35,6 @@ agent = Agent(
         Instrumentation(
             settings=InstrumentationSettings(
                 tracer_provider=convergent.tracer_provider(),
-                include_content=True,
             )
         )
     ],
@@ -44,12 +43,14 @@ agent = Agent(
 print(agent.run_sync("Is my invoice paid?").output)
 ```
 
-`include_content=True` is what puts prompts and completions in the trace.
+pydantic-ai puts prompts and completions in the trace by default.
 `InstrumentationSettings(version=...)` selects the span format pydantic-ai
 emits; the default works with Convergent.
 
 Name every agent. `Agent(name=...)` becomes `gen_ai.agent.name`, which is how the
-workspace tells agents apart.
+workspace tells agents apart. Give it a name that holds still across runs: a name
+carrying a user id, an experiment arm, or a run id turns one agent into many in
+the workspace, and the place to fix it is the `name=` argument itself.
 
 Use one `Instrumentation` capability per agent. Each one records its own copy of
 every span, so a second doubles the whole trace. When the agent already has other

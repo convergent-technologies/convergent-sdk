@@ -9,6 +9,7 @@ This file is maintained by hand; a check keeps ``__all__`` complete.
 from __future__ import annotations
 
 from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from ._check import Note, Report, check
@@ -25,7 +26,15 @@ from ._semantic import (
     tool,
 )
 
+try:
+    __version__ = version("convergent-sdk")
+except PackageNotFoundError:
+    # A checkout that runs the SDK from source has no convergent-sdk
+    # distribution to ask.
+    __version__ = "0.0.0"
+
 __all__ = [
+    "__version__",
     "init",
     "check",
     "observe",

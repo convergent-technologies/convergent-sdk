@@ -9,4 +9,4 @@ provider of your own, and how to place `convergent.otel.install()` in a pipeline
 you build by hand with no `init()` call at all. It closes with what a second
 `init()` in one process does.
 
-Page: `python/docs/opentelemetry.md` in this SDK's documentation tree.
+Page: `python/docs/opentelemetry.md` in https://github.com/convergent-technologies/convergent-sdk.

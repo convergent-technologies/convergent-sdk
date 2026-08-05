@@ -19,12 +19,28 @@ export CONVERGENT_API_KEY="cvk_xxxxxxxxxxxxxxxx"
 export GIT_SHA=$(git rev-parse --short HEAD)
 ```
 
-The export is the local form. In a deployment the key belongs in your secrets manager or
-your platform's environment configuration.
+`CONVERGENT_API_KEY` is the only environment variable the SDK requires. The export is the
+local form. In a deployment the key belongs in your secrets manager or your platform's
+environment configuration.
 
-`GIT_SHA` is the release. It ties every trace to the version of your code that produced it.
-A git sha is the usual choice, and any string that names a version works: a build id, an
-image tag, a date.
+`GIT_SHA` is this page's way of naming a release: `init(release=...)` below takes it, and
+it ties every trace to the version of your code that produced it. Any string that names a
+version works: a git sha, a build id, an image tag, a date.
+
+## Instrument with a coding agent
+
+If you use Claude Code, Cursor, or another coding agent, hand it the skill in the
+repository. Clone the repository, copy the skill into your project, and ask the agent to
+add Convergent tracing to your agent:
+
+```bash
+git clone https://github.com/convergent-technologies/convergent-sdk
+cp -r convergent-sdk/skills/instrument /path/to/your/project/.claude/skills/instrument
+```
+
+The skill has the agent list what one run touches, confirm that list with you, wrap each
+part, and then read the recorded spans back against the list. The section below is the
+same work done by hand.
 
 ## Trace a run
 
@@ -75,78 +91,24 @@ That records one agent run with one model call inside it, carrying the prompt, t
 the model, and the token counts. Any other model client goes in the same place, and the
 trace keeps the same shape.
 
-## Confirm it arrived
-
-`init()` rejects a setup that cannot work, and a setup it accepts can still fail to deliver
-quietly. `check()` reports what this process configured, then asks the server what it can
-see for the same key and release.
-
-```python
-print(convergent.check())
-```
-
-```
-convergent: enabled
-  release     9f2c1d4
-  mode        a tracer provider we created
-  sending to  convergent
-
-  round trip  ok (146ms)
-  key         org_30f981e207bf3b38
-  agents      support-agent
-
-  no notes
-```
-
-`round trip ok` means the server answered this process, and your agent's name on the
-`agents` line is the proof that a trace arrived.
-
-## What lands in the trace
-
-Each run arrives as one trace. The agent run is the root, the model calls and tool calls sit
-inside it, and each of those carries the prompts, answers, token counts, and finish reasons it
-recorded. Every trace names the release that produced it, so you can compare one version of
-your agent against another. Traces that share a conversation id read together as one thread.
-
-## Instrument with a coding agent
-
-If you use Claude Code, Cursor, or another coding agent, hand it the skill next to this
-README. Copy `skills/instrument/` into your own project, then ask the agent to add Convergent
-tracing to your agent.
-
-```bash
-cp -r skills/instrument /path/to/your/project/.claude/skills/instrument
-```
-
-The skill has the agent list what one run touches, confirm that list with you, wrap each
-part, and then read the recorded spans back against the list.
-[Instrument with a coding agent](docs/agent-skill.md) walks through what it does.
-
 ## Documentation
 
-- [Get started](docs/index.md) installs the SDK, sets your key, and confirms a run reaches
-  your workspace.
-- [Instrument your agent](docs/instrument.md) marks the agent run, the tool calls, the steps
-  in between, and the turns of a conversation.
-- [Instrument with a coding agent](docs/agent-skill.md) installs the skill above and says
-  what the agent does with it.
-- [Already using OpenTelemetry](docs/opentelemetry.md) is what `init()` does when a tracer
-  provider already exists, the agent filter, and traces that cross processes.
-- [Integrations](docs/integrations/index.md) is which instrumentation package to install for
-  the library your agent already uses.
-- [Configuration](docs/configuration.md) is the environment variables, the destinations,
-  strict startup, and what leaves your process.
-- [API reference](docs/reference/api.md) is every call in the public surface.
-- [Attribute support](docs/reference/attributes.md) is which spelling of each fact Convergent
-  reads.
-- [Troubleshooting](docs/troubleshooting.md) reads the `check()` report for you and covers
-  nothing arriving, split traces, and missing agents.
+This README is the companion document to
+[github.com/convergent-technologies/convergent-sdk](https://github.com/convergent-technologies/convergent-sdk),
+and everything past this point lives there.
 
-## Examples
+```bash
+git clone https://github.com/convergent-technologies/convergent-sdk
+```
 
-`examples/quickstart/main.py` is the run above as a file, with the model call answered from
-a script in the same file so it runs with no OpenAI key and no network.
+The full documentation is under `python/docs/`: confirming a run arrived with `check()`,
+instrumenting your agent by hand, attaching to an existing OpenTelemetry setup, the
+integration packages, configuration, the API reference, the attribute spellings Convergent
+reads, and troubleshooting.
 
-`examples/parallel-workers/` records one trace across a dispatcher and three queue worker
-processes. It needs no credentials and checks its own output.
+`skills/instrument/` is the skill from the coding-agent section above.
+
+`python/examples/` holds runnable examples: the run above as a self-contained file that
+needs no OpenAI key, and one trace recorded across a dispatcher and three worker
+processes.
 

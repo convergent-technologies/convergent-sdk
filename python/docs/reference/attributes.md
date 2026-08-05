@@ -16,6 +16,15 @@ below are the full mapping, on both the live receiver and the file import path.
 - The conventions are applied in the column order below, so the first one with a
   value wins.
 
+A key in no table below stays on the stored span and is readable there, and
+nothing computed reads it: it becomes no token count, no cost, no other
+first-class field. To make such a fact first-class, record it under the key in
+the first column: on a span your own code opens,
+`call.set_attribute("gen_ai.usage.cost", 0.0042)` writes it. A span an
+instrumentation package writes carries what the package put there; where that
+package's spelling has no row here, file it at
+[github.com/convergent-technologies/convergent-sdk/issues](https://github.com/convergent-technologies/convergent-sdk/issues).
+
 ## Which spelling of each fact we read
 
 A dash means that convention's table has no row for the fact. Either the

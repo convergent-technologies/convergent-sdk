@@ -10,4 +10,4 @@ with no variable. It also covers
 `gen_ai.conversation.id` for linking the turns of a multi-turn conversation, and
 `flush()` for a process whose exit skips the interpreter's exit hook.
 
-Page: `python/docs/instrument.md` in this SDK's documentation tree.
+Page: `python/docs/instrument.md` in https://github.com/convergent-technologies/convergent-sdk.

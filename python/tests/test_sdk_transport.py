@@ -9,7 +9,12 @@ from typing import Any
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    SimpleSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
+)
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import convergent
@@ -279,6 +284,85 @@ def test_flush_reports_whether_the_export_delivered(
 
     assert result.ok is expected_ok
     assert result.dropped == expected_dropped
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_flush_counts_the_batches_rejected_credentials_lose(
+    status_code: int,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Once the collector rejects the key, the session answers the exporter with
+    a success so nothing retries -- and ``flush()`` must still report the refused
+    batch and every batch withheld after it, or ``assert flush().ok`` in CI
+    passes on a setup that delivers nothing."""
+
+    class Session:
+        headers: dict[str, str] = {}
+
+        def post(self, **_: object) -> SimpleNamespace:
+            return SimpleNamespace(ok=False, status_code=status_code, reason="rejected")
+
+        def close(self) -> None:
+            pass
+
+    guard = _transport.AuthRejectingSession(Session())
+
+    class Exporter(SpanExporter):
+        """The OTLP exporter's shape: believes the session's response."""
+
+        def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+            response = guard.post(url="https://collector.test/v1/traces")
+            return SpanExportResult.SUCCESS if response.ok else SpanExportResult.FAILURE
+
+        def shutdown(self) -> None: ...
+
+        def force_flush(self, timeout_millis: int = 30_000) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        _transport,
+        "build_processor",
+        lambda **_: _transport.batch_processor(Exporter(), rejected=guard.is_rejected),
+    )
+    with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
+        convergent.init(
+            api_key="key",  # pragma: allowlist secret
+            endpoint="https://example.test",
+            release="r1",
+        )
+
+        @convergent.observe(name="job", operation="agent_run")
+        def work() -> None: ...
+
+        work()
+        refused = convergent.flush(timeout_ms=2_000)
+        work()
+        withheld = convergent.flush(timeout_ms=2_000)
+
+    assert (refused.ok, refused.dropped) == (False, 1)
+    assert (withheld.ok, withheld.dropped) == (False, 1)
+    assert "rejected its credentials" in caplog.text
+
+
+def test_build_processor_wires_the_sessions_rejection_into_the_loss_counter() -> None:
+    """The e2e test above builds its own processor, so this is what holds the
+    real ``build_processor`` to the same wiring."""
+    processor = _transport.build_processor(api_key="k", endpoint="https://collector.test")
+
+    assert isinstance(processor, BatchSpanProcessor)
+    exporter = processor.span_exporter
+    assert isinstance(exporter, _transport._LossCountingExporter)
+    assert (
+        getattr(exporter._rejected, "__func__", None) is _transport.AuthRejectingSession.is_rejected
+    )
+    # The session the counter asks is the one the exporter posts through, not
+    # merely some AuthRejectingSession.
+    assert getattr(exporter._rejected, "__self__", None) is getattr(
+        exporter._exporter, "_session", None
+    )
+
+    processor.shutdown()
 
 
 def test_exporter_setup_failure_disables_tracing(

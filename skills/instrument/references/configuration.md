@@ -10,4 +10,4 @@ section covers the export threads, what happens under backpressure, what a
 failed export does, and the 401 or 403 that turns sending off for the life of
 the process.
 
-Page: `python/docs/configuration.md` in this SDK's documentation tree.
+Page: `python/docs/configuration.md` in https://github.com/convergent-technologies/convergent-sdk.

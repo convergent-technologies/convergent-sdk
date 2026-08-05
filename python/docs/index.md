@@ -12,6 +12,8 @@ and confirming that the run reached your workspace.
 pip install convergent-sdk
 ```
 
+With uv, `uv add convergent-sdk`. With poetry, `poetry add convergent-sdk`.
+
 The package brings the OpenTelemetry pieces it needs.
 [What gets installed](configuration.md#what-gets-installed) lists them.
 

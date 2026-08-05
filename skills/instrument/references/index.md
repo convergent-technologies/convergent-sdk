@@ -9,4 +9,4 @@ example, so you can tell a setup that reached the server from one that only
 looks configured. It closes with the workspace page to open once a run has
 arrived.
 
-Page: `python/docs/index.md` in this SDK's documentation tree.
+Page: `python/docs/index.md` in https://github.com/convergent-technologies/convergent-sdk.

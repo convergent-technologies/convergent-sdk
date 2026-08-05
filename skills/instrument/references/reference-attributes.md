@@ -12,4 +12,4 @@ accepted `gen_ai.operation.name` values for the OpenLLMetry and OpenInference
 vocabularies and the operation each one becomes. A closing section names the
 attributes left alone, such as request parameters other than the model.
 
-Page: `python/docs/reference/attributes.md` in this SDK's documentation tree.
+Page: `python/docs/reference/attributes.md` in https://github.com/convergent-technologies/convergent-sdk.
