@@ -1,0 +1,59 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  UV_VERSION: "0.11.14"
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install uv
+        run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+      - name: Sync environment
+        run: uv sync --python ${{ matrix.python-version }}
+      - run: uv run ruff check src tests
+      - run: uv run pyright
+      - run: uv run pytest
+
+  # The suite against the oldest OpenTelemetry train the package metadata allows.
+  # Two tests need newer releases and are excluded here: drop counting needs
+  # BatchSpanProcessor's meter_provider (1.41+), and the pydantic-ai interop
+  # tests need pydantic-ai 2.x, which needs a newer train.
+  floor:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install uv
+        run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+      - name: Install at the floor
+        run: |
+          uv venv .venv-floor
+          uv pip install --python .venv-floor --no-deps .
+          uv pip install --python .venv-floor pytest \
+            "opentelemetry-api==1.25.0" \
+            "opentelemetry-sdk==1.25.0" \
+            "opentelemetry-exporter-otlp-proto-http==1.25.0" \
+            "opentelemetry-instrumentation==0.46b0"
+      - name: Run the suite at the floor
+        run: |
+          .venv-floor/bin/python -m pytest tests \
+            --ignore tests/test_sdk_transport.py \
+            --deselect tests/test_sdk_destinations.py::test_flush_reports_the_spans_a_full_queue_threw_away

@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "convergent-sdk"
+version = "0.0.3"
+description = "Records your Python AI agent runs as OpenTelemetry spans and sends them to Convergent."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+authors = [{ name = "Convergent", email = "support@convergent.dev" }]
+keywords = ["convergent", "observability", "tracing", "opentelemetry", "agents"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Monitoring",
+]
+# 1.25.0 is the true import floor: `opentelemetry.semconv.attributes` first
+# ships there. Everything works down to it except drop-count telemetry, which
+# needs BatchSpanProcessor's `meter_provider` argument (1.41.0); below that,
+# FlushResult.dropped reads 0 by the fallback in `_transport.batch_processor`.
+dependencies = [
+  "requests>=2.31",
+  "protobuf>=4.25",
+  "opentelemetry-semantic-conventions>=0.46b0",
+  "opentelemetry-api>=1.25.0",
+  "opentelemetry-sdk>=1.25.0",
+  "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+]
+
+[project.urls]
+Homepage = "https://convergent.dev"
+Repository = "https://github.com/convergent-technologies/convergent-sdk"
+Issues = "https://github.com/convergent-technologies/convergent-sdk/issues"
+
+# pydantic-ai is a test dependency only. The SDK ships no pydantic-ai code -- it
+# is here so the transport tests can prove that a framework pointed at the tracer
+# provider `init()` set up lands in the same execution as `observe()`.
+#
+# opentelemetry-instrumentation is a test dependency for the same kind of reason.
+# The SDK writes the older suppression key out by hand rather than importing it,
+# and the processor tests read that key back through `is_instrumentation_enabled`.
+[dependency-groups]
+dev = [
+  "openai>=2.41",
+  "httpx>=0.28",
+  "pytest>=9.0",
+  "pytest-xdist>=3.8",
+  "ruff>=0.15",
+  "pyright>=1.1.400",
+  "pydantic-ai-slim>=1.107.0",
+  "opentelemetry-instrumentation>=0.64b0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/convergent"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/**", "/README.md", "/LICENSE"]
+exclude = [".gitignore"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# The source files are linted upstream with ("E", "F", "I", "UP", "B"); the
+# extra rules here are ones they already satisfy.
+select = ["E", "F", "W", "I", "UP", "B", "RUF"]
+# RUF022: the public __all__ is ordered as a reader should meet the API (setup,
+# diagnosis, spans, lifecycle, destinations, status), not alphabetically, and a
+# test asserts that exact order.
+# Some files carry `noqa` directives for rules this config does not select; the
+# directives are inert and left alone.
+ignore = ["E501", "RUF022", "RUF100"]
+
+# Tests are copied verbatim too, so the same reasoning applies to the RUF rules
+# their style trips over.
+[tool.ruff.lint.per-file-ignores]
+# I001: the refresh rewrite renames `convergent.sdk` imports to `convergent`,
+# which can leave the copied import block out of isort order.
+"tests/**" = ["RUF012", "RUF043", "I001"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
