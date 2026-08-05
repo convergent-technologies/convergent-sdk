@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+uv.lock
+.env
+.env.*
+.scratch-venv/
+
+.DS_Store
+spans/

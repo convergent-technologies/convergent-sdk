@@ -1,0 +1,30 @@
+# Publishes the Python SDK to PyPI via trusted publishing (OIDC). Before the
+# first release:
+#   1. Configure this repository as a trusted publisher on the existing "convergent-sdk" PyPI project and add this repo as a
+#      trusted publisher (workflow: release.yml, environment: pypi).
+#   2. Create a GitHub environment named "pypi" on this repo.
+# Until then this workflow is manual-only and will fail at the publish step.
+name: Release
+
+on:
+  workflow_dispatch:
+
+env:
+  UV_VERSION: "0.11.14"
+
+jobs:
+  publish-python:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install uv
+        run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+      - run: uv build
+      - run: uv publish --trusted-publishing always
