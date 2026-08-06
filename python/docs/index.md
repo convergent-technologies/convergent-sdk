@@ -37,6 +37,10 @@ date.
 
 ### 3. Trace a run
 
+The SDK ships an agent skill that helps a coding agent instrument your code
+with the SDK. [Instrument with a coding agent](agent-skill.md) covers
+installing and using it. This step shows the same work by hand.
+
 Call `init()` once at startup, and put `agent()` on the function that handles one
 request. The model call inside it is the one your app already makes, and this one
 is the OpenAI client. Save it as `app.py`.
@@ -134,8 +138,8 @@ model call carrying the prompt, the answer, and its token counts.
 
 ## What to read next
 
-- [Instrument your agent](instrument.md): tools, sub-steps, and recording what went in and out.
 - [Instrument with a coding agent](agent-skill.md): the skill that tells a coding agent how to add the tracing.
+- [Instrument your agent](instrument.md): tools, sub-steps, and recording what went in and out.
 - [Already using OpenTelemetry](opentelemetry.md): what `init()` does when a tracer provider already exists, and the agent filter.
 - [Configuration](configuration.md): environment variables, destinations, and runtime behavior.
 - [Troubleshooting](troubleshooting.md): nothing arriving, split traces, missing agents.
