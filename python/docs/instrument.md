@@ -5,7 +5,8 @@ description: Mark the agent run, the tool calls, and the steps in between.
 
 Four calls open spans: `agent()` for one agent run, `tool()` for one tool call,
 and `span()` and `observe()` for the steps in between. `init()` configures where
-those spans go.
+those spans go. The SDK ships an agent skill that helps a coding agent do this
+instrumentation; see [Instrument with a coding agent](agent-skill.md).
 
 ## Mark the agent run
 
