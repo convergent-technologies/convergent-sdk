@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -162,11 +161,23 @@ def test_get_json_refuses_to_follow_a_redirect() -> None:
     assert registry.requests[0]["path"] == "/v1/check"
 
 
-def test_post_json_stays_within_its_wall_clock_deadline() -> None:
+def test_post_json_stops_at_its_deadline_rather_than_its_attempt_cap() -> None:
     """A server that keeps failing must not run past the deadline, even with a
-    generous attempt cap: the wall clock, not the attempt count, bounds it."""
+    generous attempt cap: the elapsed time, not the attempt count, bounds it.
+
+    The clock here is a number this test adds to, and the only thing that adds to
+    it is the retry backoff. Backoff doubles from 0.01s, so the fourth wait would
+    land at 0.15s, past the 0.1s deadline, and the loop stops with three waits
+    behind it. Nothing is measured against the real clock, so a busy machine
+    cannot change the count.
+    """
+    now = 0.0
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
     with _FakeRegistry([(503, {})]) as registry:
-        start = time.monotonic()
         with pytest.raises(RegistrationError):
             post_json(
                 f"{registry.url}/v1/deployments",
@@ -175,11 +186,13 @@ def test_post_json_stays_within_its_wall_clock_deadline() -> None:
                 max_attempts=100,
                 base_backoff=0.01,
                 deadline=0.1,
+                sleep=sleep,
+                monotonic=lambda: now,
+                rng=lambda: 1.0,
             )
-        elapsed = time.monotonic() - start
 
-    assert elapsed < 1.0, f"registration overran its 0.1s deadline ({elapsed:.3f}s)"
-    assert len(registry.requests) < 100, "the deadline, not max_attempts, stopped the loop"
+    assert now < 0.1, "the loop stopped before the deadline it was given"
+    assert len(registry.requests) == 4, "the deadline, not max_attempts, stopped the loop"
 
 
 def test_post_json_rejects_an_oversized_response() -> None:
