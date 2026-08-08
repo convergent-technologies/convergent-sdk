@@ -127,6 +127,9 @@ _provider_source: Callable[[], TracerProvider | None] | None = None
 #: first flush also starts deployment registration.
 _registration_triggers: dict[_Config, Callable[[], None]] = {}
 _warned: set[str] = set()
+#: The clock :func:`flush` measures its budget against, named so a test can hold
+#: it still and drive the budget by hand instead of racing a loaded machine.
+_monotonic: Callable[[], float] = time.monotonic
 _atexit_registered = False
 _after_fork_registered = False
 _finalize_registered = False
@@ -693,7 +696,7 @@ def flush(timeout_ms: int = 5_000) -> FlushResult:
     the same time split the signal: exactly one of them sees a given loss, in its
     ``ok`` and in its ``dropped``.
     """
-    started = time.monotonic()
+    started = _monotonic()
     with _lock:
         processors = tuple(_processors)
         triggers = tuple(_registration_triggers.values())
@@ -706,7 +709,7 @@ def flush(timeout_ms: int = 5_000) -> FlushResult:
     deadline = started + max(timeout_ms, 0) / 1_000
     ok = True
     for processor in processors:
-        remaining_ms = max(0, int((deadline - time.monotonic()) * 1_000))
+        remaining_ms = max(0, int((deadline - _monotonic()) * 1_000))
         try:
             if _transport.is_shut_down(processor):
                 continue
@@ -719,7 +722,7 @@ def flush(timeout_ms: int = 5_000) -> FlushResult:
     lost = _transport.lost_spans()
     ok = ok and lost == 0
     dropped = _transport.dropped_spans() + lost
-    elapsed_ms = int((time.monotonic() - started) * 1_000)
+    elapsed_ms = int((_monotonic() - started) * 1_000)
     # Only when the flush actually failed *and* something is still queued. Spans
     # left behind by a successful flush are a busy process, not a problem.
     if not ok and pending:

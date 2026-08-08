@@ -1,0 +1,25 @@
+{
+  "content-version": "2026-08-08",
+  "requires-plugin": ">=0.1",
+  "files": [
+    "SKILL.md",
+    "workers/verify.md",
+    "behaviors/agent-identity-stability/BEHAVIOR.md",
+    "behaviors/coverage-plan-fidelity/BEHAVIOR.md",
+    "behaviors/no-foreign-noise/BEHAVIOR.md",
+    "behaviors/recorded-content-fidelity/BEHAVIOR.md",
+    "behaviors/trace-structure/BEHAVIOR.md",
+    "references/agent-skill.md",
+    "references/configuration.md",
+    "references/index.md",
+    "references/instrument.md",
+    "references/integrations-langchain.md",
+    "references/integrations-litellm.md",
+    "references/integrations-pydantic-ai.md",
+    "references/integrations.md",
+    "references/opentelemetry.md",
+    "references/reference-api.md",
+    "references/reference-attributes.md",
+    "references/troubleshooting.md"
+  ]
+}

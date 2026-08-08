@@ -38,20 +38,6 @@ git clone https://github.com/convergent-technologies/convergent-sdk
 cp -r convergent-sdk/skills/instrument /path/to/your/project/.claude/skills/instrument
 ```
 
-Or skip both commands and paste this to your agent instead, which does the same thing and
-then gets to work:
-
-```text
-Clone https://github.com/convergent-technologies/convergent-sdk, copy its
-skills/instrument directory into .claude/skills/instrument in this project, and then
-use that skill to add Convergent tracing to this codebase.
-
-Follow the skill end to end: plan what one run of my agent touches, confirm that plan
-with me before you change anything, then instrument the agent run, every model call,
-and every tool call. Finish by running the skill's verification and tell me whether
-spans actually reached Convergent.
-```
-
 The skill has the agent list what one run touches, confirm that list with you, wrap each
 part, and then read the recorded spans back against the list. The section below is the
 same work done by hand.
