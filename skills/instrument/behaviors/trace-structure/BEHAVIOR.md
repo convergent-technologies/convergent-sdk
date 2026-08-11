@@ -37,12 +37,7 @@ that the span does not carry, and every `MISSING` it prints is a violation
 unless the ledger shows the user waived that fact. A missing tool call id is
 what makes one tool call show as two rows in the workspace.
 
-## Recorded durations match the work
-
-A model span's duration covers the request it names. A span reading a few
-milliseconds around a call that takes seconds was closed before the response
-arrived, which is the shape of a span opened around the call rather than inside
-the function making it. Compare the durations the script prints against what
-the calls plausibly took, and where a model call has no token counts and a
-duration far below the rest, report it as a violation rather than as a fast
-call.
+A model call missing its token counts is usually a span opened around the call
+rather than inside the function making it: the counts are on the provider's
+response, so a span closed before the response arrived cannot carry them. Say so
+in the finding, because it names the fix.

@@ -79,6 +79,12 @@ recording unverified:
 
 - `/convergent-instrument:cancel` disarms the loop for the current project and
   leaves the plugin installed.
+- `/convergent-instrument:waive <criteria> <why>` leaves one finding open on
+  purpose. The gate stops holding for that finding at the next stop rather than
+  waiting for another verifier pass to read the ledger, and every release names
+  each waiver it applied with the reason given. Add `--match "<substring>"` where
+  one criteria raised several findings and only one is being waived. A release
+  carrying waivers says so and is not a clean verification.
 - `/plugin disable convergent-instrument` turns the whole plugin off, and
   uninstalling it does the same.
 - `python3 scripts/disarm.py` disarms the loop from a shell.
@@ -105,6 +111,9 @@ of them is silent.
 - `agents/verifier.md` — the verifier subagent. It reads evidence and reports;
   it has no edit tools, and the one file it writes is its findings file.
 - `commands/cancel.md` — the cancel command.
+- `commands/waive.md` and `scripts/waive.py` — the waive command. Both are
+  user-invoked only (`disable-model-invocation`), and the waiver they record is
+  named in every release that applies it.
 - `skills/instrument/SKILL.md` — a loader: the skill's instructions are read
   from the freshest content copy at use time.
 - `scripts/run_checker.py` — the checker entry point. It is not a fork of the

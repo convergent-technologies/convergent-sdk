@@ -24,6 +24,7 @@ STATE_DIR = ".convergent-instrument"
 STATE_FILE = "state.json"
 LEDGER_FILE = "plan.md"
 VERDICT_FILE = "verdict.json"
+WAIVERS_FILE = "waivers.json"
 FINDINGS_GLOB = "findings-*.json"
 
 #: Blocks per armed cycle before the gate gives up and releases the stop.
@@ -275,6 +276,93 @@ def open_count(findings: dict) -> int:
         if c.get("verdict") == "false" and c.get("classification") != "acknowledged"
     )
     return max(counted, findings["open_count"])
+
+
+def waivers_path(project_dir: Path) -> Path:
+    return project_dir / STATE_DIR / WAIVERS_FILE
+
+
+def load_waivers(project_dir: Path) -> list[dict]:
+    """The waivers the user confirmed, each naming the criteria it covers.
+
+    Written by the cancel-adjacent waive command, which the user runs. Nothing
+    here is unforgeable: an agent with a shell can write this file, exactly as it
+    can write a verdict. What keeps it honest is that every waiver a release
+    applied is named in the release message, so a waiver nobody granted is
+    visible in the transcript rather than silent.
+    """
+    try:
+        data = json.loads(waivers_path(project_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    entries = data.get("waived") if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        return []
+    return [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("criteria"), str) and entry["criteria"]
+    ]
+
+
+def findings_for(project_dir: Path, verdict: dict) -> dict | None:
+    """The findings file an attestation was written from."""
+    name = verdict.get("findings_file")
+    if not isinstance(name, str) or not name or "/" in name:
+        return None
+    try:
+        data = json.loads((project_dir / STATE_DIR / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def waived_clauses(findings: dict, waivers: list[dict]) -> list[tuple[dict, dict]]:
+    """Open clauses a waiver covers, paired with the waiver that covers each.
+
+    A waiver names a criteria file, and optionally a substring that has to appear
+    in the clause or its evidence. The substring is what keeps a waiver of one
+    finding from covering the next finding the same criteria raises.
+    """
+    clauses = findings.get("clauses")
+    if not isinstance(clauses, list):
+        return []
+    out: list[tuple[dict, dict]] = []
+    for clause in clauses:
+        if not isinstance(clause, dict):
+            continue
+        if clause.get("verdict") != "false" or clause.get("classification") == "acknowledged":
+            continue
+        haystack = (
+            f"{clause.get('criteria', '')} {clause.get('clause', '')} {clause.get('evidence', '')}"
+        )
+        for waiver in waivers:
+            if waiver["criteria"] != clause.get("criteria"):
+                continue
+            needle = waiver.get("clause")
+            if isinstance(needle, str) and needle and needle not in haystack:
+                continue
+            out.append((clause, waiver))
+            break
+    return out
+
+
+def last_verifier_agent(project_dir: Path, state: dict) -> str | None:
+    """The verifier id this arming already ran, so a later pass resumes it.
+
+    A resumed verifier keeps the criteria files, the integration pages, and this
+    recording's history in its context, which is most of what a pass spends. The
+    id is recorded by the SubagentStop hook and is scoped to the arming, so a new
+    arming gets a verifier that comes to the evidence cold.
+    """
+    try:
+        verdict = json.loads(verdict_path(project_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(verdict, dict) or verdict.get("arming_id") != state.get("arming_id"):
+        return None
+    agent_id = verdict.get("agent_id")
+    return agent_id if isinstance(agent_id, str) and agent_id else None
 
 
 def read_attestation(project_dir: Path, state: dict) -> tuple[dict | None, str]:
