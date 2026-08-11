@@ -78,12 +78,24 @@ def _run_the_agent_instruction(spans: Path | None) -> str:
     )
 
 
-def _instruction(project_dir: Path) -> str:
+def _instruction(project_dir: Path, state: dict) -> str:
     behaviors = gate_lib.resolve_content_dir() / "behaviors"
     ledger = gate_lib.ledger_path(project_dir)
+    resume = gate_lib.last_verifier_agent(project_dir, state)
+    if resume:
+        lead = (
+            f"Do one thing next: resume the {VERIFIER_AGENT} subagent this pass already ran, "
+            f"by sending a message to agent id {resume} rather than dispatching a new one, so "
+            "it keeps the criteria and this recording's history instead of reading them again. "
+            "Where resuming is refused or unavailable, dispatch a fresh one instead. Give it "
+        )
+    else:
+        lead = (
+            f"Do one thing next: dispatch the {VERIFIER_AGENT} subagent, in the foreground "
+            "so you have its report before you finish, with "
+        )
     return (
-        f"Do one thing next: dispatch the {VERIFIER_AGENT} subagent, in the foreground "
-        "so you have its report before you finish, with these findings, the ledger at "
+        lead + "these findings, the ledger at "
         f"{ledger}, and the behavior criteria under {behaviors}; on its verdicts, fix "
         "every finding it classifies fix, put the ones it classifies ask to the user, "
         "and append its findings block to the ledger. The verdict that releases this "
@@ -124,8 +136,37 @@ def decide(hook_input: dict, run=gate_lib.run_checker) -> dict | None:
         }
 
     attestation, missing = gate_lib.read_attestation(project_dir, state)
-    if code == 0 and attestation is not None and attestation["verdict"] == "clean":
+
+    # A waiver the user confirmed closes the finding it names now, rather than on
+    # the pass after the one that reads the ledger. Waiting for that pass is a
+    # full verifier run spent to learn what the user already said.
+    waived: list[tuple[dict, dict]] = []
+    open_after_waivers = None
+    if attestation is not None:
+        open_after_waivers = int(attestation["open_count"])
+        if open_after_waivers:
+            findings = gate_lib.findings_for(project_dir, attestation)
+            if findings is not None:
+                waived = gate_lib.waived_clauses(findings, gate_lib.load_waivers(project_dir))
+                open_after_waivers = max(0, open_after_waivers - len(waived))
+
+    if code == 0 and attestation is not None and open_after_waivers == 0:
         _disarm(project_dir, state)
+        if waived:
+            named = "; ".join(
+                f"{clause.get('criteria', '?')} ({waiver.get('reason') or 'no reason recorded'})"
+                for clause, waiver in waived
+            )
+            _note_in_ledger(
+                project_dir, f"verification: released with {len(waived)} waived finding(s): {named}"
+            )
+            return {
+                "systemMessage": (
+                    f"convergent-instrument: verified with {len(waived)} finding(s) waived by you "
+                    f"— {named}. The checker is clean and every finding the verifier left open is "
+                    "one you waived. Say in your final report which findings were waived and why."
+                )
+            }
         return {
             "systemMessage": (
                 "convergent-instrument: verified — the checker is clean and the verifier "
@@ -134,7 +175,7 @@ def decide(hook_input: dict, run=gate_lib.run_checker) -> dict | None:
         }
 
     verdict_summary = (
-        missing if attestation is None else f"verifier attested open {attestation['open_count']}"
+        missing if attestation is None else f"verifier attested open {open_after_waivers}"
     )
     findings = gate_lib.findings_tail(output)
     key = gate_lib.outcome_hash(
@@ -155,7 +196,7 @@ def decide(hook_input: dict, run=gate_lib.run_checker) -> dict | None:
         summary = f"nothing has been recorded at {spans} yet"
         instruction = _run_the_agent_instruction(spans)
     else:
-        instruction = _instruction(project_dir)
+        instruction = _instruction(project_dir, state)
         if code != 0:
             summary = (
                 f"the recording did not pass its checks "
@@ -172,8 +213,14 @@ def decide(hook_input: dict, run=gate_lib.run_checker) -> dict | None:
                 )
         else:
             summary = (
-                "the checks pass, but the verifier attested "
-                f"{attestation['open_count']} open findings"
+                f"the checks pass, but the verifier attested {open_after_waivers} open findings"
+            )
+            if waived:
+                summary += f", with {len(waived)} more you already waived"
+            summary += (
+                ". A finding only the user can settle is one to put to them; where they say "
+                "to leave it, `/convergent-instrument:waive` closes it without another "
+                "verifier pass"
             )
     reason = f"convergent-instrument: {summary}.\n\n{findings}\n\n{instruction}"
     return {"decision": "block", "reason": reason}
