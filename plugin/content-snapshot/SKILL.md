@@ -27,6 +27,7 @@ are what you have.
 | `references/index.md` | Get started | Install the SDK, set your key, and confirm a run reaches your workspace. |
 | `references/instrument.md` | Instrument your agent | Mark the agent run, the tool calls, and the steps in between. |
 | `references/agent-skill.md` | Instrument with a coding agent | What this skill is, and how a user installs it in their own project. |
+| `references/plugin.md` | Enforce the verification loop with a plugin | How step 4 becomes a gate, and the commands that waive a finding or cancel one. |
 | `references/integrations.md` | Integrations | How the calls a library already makes become spans, and which package to install. |
 | `references/integrations-langchain.md` | LangChain | Trace every chain, model call, and tool call LangChain runs. |
 | `references/integrations-litellm.md` | litellm | Trace every model call litellm makes, whichever provider it routes to. |
