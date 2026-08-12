@@ -29,18 +29,37 @@ version works: a git sha, a build id, an image tag, a date.
 
 ## Instrument with a coding agent
 
-If you use Claude Code, Cursor, or another coding agent, hand it the skill in the
-repository. Clone the repository, copy the skill into your project, and ask the agent to
-add Convergent tracing to your agent:
+If you use Claude Code, Codex, Cursor, or another coding agent, install the two skills and
+ask the agent to add Convergent tracing:
 
 ```bash
-git clone https://github.com/convergent-technologies/convergent-sdk
-cp -r convergent-sdk/skills/instrument /path/to/your/project/.claude/skills/instrument
+npx skills add convergent-technologies/convergent-sdk
 ```
 
-The skill has the agent list what one run touches, confirm that list with you, wrap each
-part, and then read the recorded spans back against the list. The section below is the
-same work done by hand.
+Install `convergent-instrument` and `convergent-verify` when the installer asks. The first
+skill instruments one representative path. The second skill reads the resulting recording
+without changing code. The section below is the same instrumentation done by hand.
+
+For a new setup, give your coding agent this prompt:
+
+```text
+Install convergent-instrument and convergent-verify from convergent-technologies/convergent-sdk.
+Use convergent-instrument to instrument the agent in <agent file or directory>.
+Use <command that runs the agent> as the representative run.
+Use convergent-verify to inspect each recording.
+Continue until the recording has no unresolved instrumentation issue.
+```
+
+For an existing setup, give your coding agent this prompt:
+
+```text
+Install convergent-instrument and convergent-verify from convergent-technologies/convergent-sdk.
+Use convergent-instrument and convergent-verify to review the existing Convergent
+instrumentation for the agent in <agent file or directory>.
+Use <command that runs the agent> as the representative run.
+Fix each evidence-backed instrumentation issue.
+Rerun and verify until the expected recording is complete.
+```
 
 ## Trace a run
 
@@ -106,9 +125,9 @@ instrumenting your agent by hand, attaching to an existing OpenTelemetry setup, 
 integration packages, configuration, the API reference, the attribute spellings Convergent
 reads, and troubleshooting.
 
-`skills/instrument/` is the skill from the coding-agent section above.
+`skills/convergent-instrument/` and `skills/convergent-verify/` are the skills from the
+coding-agent section above.
 
 `python/examples/` holds runnable examples: the run above as a self-contained file that
 needs no OpenAI key, and one trace recorded across a dispatcher and three worker
 processes.
-
