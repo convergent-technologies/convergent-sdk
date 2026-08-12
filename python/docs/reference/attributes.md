@@ -58,13 +58,17 @@ key carries one.
 
 The two spellings in the OpenTelemetry column are the conventions' own earlier
 names, renamed by the conventions themselves in v1.27.0 and v1.37.0. They are
-still live traffic, because they are what OpenLLMetry's `semconv_ai` package
-emits today and what litellm's default OpenTelemetry callback goes through.
+still live traffic. OpenLLMetry's `semconv_ai` package emits them today, and so
+does litellm: its default OpenTelemetry callback writes `gen_ai.system`, and its
+`otel_v2` callback ships a compatibility mapper, on unless you turn it off, that
+writes both earlier names beside the current ones.
 
 `gen_ai.usage.cost` sits outside the conventions. It is the one cost spelling a
 producer and a consumer already agree on: OpenLIT's SDK writes it and Langfuse
-reads it. litellm's two integrations spell their own cost differently and cannot
-both be on one span, so both rows are here.
+reads it. litellm's two OpenTelemetry callbacks spell one call's cost two ways,
+so both rows are here. Its default callback writes `gen_ai.cost.total_cost`. Its
+newer `otel_v2` callback writes `litellm.cost.total`, on its model spans and on
+the tool spans it prices alike, such as a call to an MCP tool.
 
 `gen_ai.conversation.id` and `session.id` are two names for the same id. The
 OpenTelemetry GenAI conventions use the first and OpenInference uses the
@@ -104,13 +108,22 @@ what tell the two apart.
 
 ## Operation names
 
+This section is about the one attribute `gen_ai.operation.name`: which producer
+values become which, and what happens to a value nothing here lists.
+
 The tables below rename a producer's own span kind onto
 `gen_ai.operation.name`. That target is a closed set, so a source value with no
 row below is dropped rather than copied across.
 
-A span that already states `gen_ai.operation.name` keeps the value it states.
-Nothing here rewrites it, and nothing folds one operation name onto another, so
-an operation your own code wrote reaches storage as the word you wrote.
+A span that already states `gen_ai.operation.name` keeps the value it states,
+unless the producer that wrote it has a table below of its own words for that
+key. Today litellm is the only one. Each table belongs to the producer it is
+listed under and is applied to that producer's spans, which is what lets one
+word mean different things in different tables.
+
+An operation name no table covers reaches storage as the word the producer
+wrote. It renders as a plain step on the timeline, with the content on it, and
+without the model, the token counts, or the cost being read as a model call's.
 
 ### OpenLLMetry and Traceloop values for gen_ai.operation.name
 
@@ -137,6 +150,65 @@ an operation your own code wrote reaches storage as the word you wrote.
 | `tool` | `execute_tool` |
 | `agent` | `invoke_agent` |
 | `prompt` | `text_completion` |
+
+### litellm values for gen_ai.operation.name
+
+litellm writes `gen_ai.operation.name` itself rather than renaming another key
+onto it, and the word it writes there is the name of the call type the caller
+made. Its default OpenTelemetry callback puts that name in the attribute as it
+stands, spelling only `completion` as `chat`, so a call to the OpenAI Responses
+API arrives as `responses` and an embedding arrives as `embedding`. The rows
+below are litellm's own statement of what each of its call types means, taken
+from `_OPERATION_BY_CALL_TYPE` in `litellm/integrations/otel/model/semconv.py`,
+less two of that table's rows.
+
+| What the producer writes | What it becomes |
+| --- | --- |
+| `completion` | `chat` |
+| `acompletion` | `chat` |
+| `completion_with_retries` | `chat` |
+| `responses` | `chat` |
+| `aresponses` | `chat` |
+| `atext_completion` | `text_completion` |
+| `embedding` | `embeddings` |
+| `aembedding` | `embeddings` |
+
+Five of the eight land on `chat` because litellm's chat completions and its
+Responses API calls are both chat completions in the conventions. One entry
+point takes the OpenAI Responses request shape and the other the chat
+completions shape, and both return an assistant turn from a chat model.
+
+Your model calls are read whichever litellm you run. Recent versions ship a
+second callback, `otel_v2`, which runs the call type through the same table
+before it writes the span, so its spans already say `chat` where the table above
+says `chat`, and every row here leaves them as they are. The default callback
+lands on the same word for all eight rows when you set
+`OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`, by a different
+route: it matches on part of the call type rather than reading the table, and
+the only words it can write are `chat`, `text_completion`, and `embeddings`.
+
+Two of litellm's rows are left out of the table above. The first is
+`text_completion`, which litellm maps to `text_completion`. That is already the
+conventions' own word, so the row would change nothing, and a table whose value
+is also one of its keys folds a second time when a trace is read again. The
+second is `call_mcp_tool`, which litellm maps to `execute_tool`. Only the
+default callback writes that call type, and it writes none of
+`gen_ai.tool.name`, `gen_ai.tool.call.arguments`, or `gen_ai.tool.call.result`
+beside it. The tool's name, arguments, and result arrive inside a
+`metadata.mcp_tool_call_metadata` value the span carries whole. Reading the word
+as a tool call would give you a tool call with no name and no arguments in place
+of a step that shows that value. The `otel_v2` callback writes `execute_tool`
+itself, so its MCP spans are read as tool calls with or without a row here.
+
+A call type litellm's own table does not list, such as `image_generation`, keeps
+the word litellm wrote and renders as a plain step. That holds for the default
+callback with no opt-in set. The other two paths write `chat` for a call type
+they do not list, so the same call arrives as a model call.
+
+These rows are read on spans whose tracer is named `litellm`, or a dotted child
+of it, and on no others. The words are litellm's own, and they are not all its
+own alone: `completion` is a text completion in the OpenLLMetry table above and
+a chat completion here, because that is what each producer means by it.
 
 ## What is not renamed
 

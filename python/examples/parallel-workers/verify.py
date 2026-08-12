@@ -3,8 +3,8 @@
 
     uv run python/examples/parallel-workers/verify.py [spans-dir]
 
-Runs show_spans.py from the instrument skill for the human-readable tree, then
-checks the exact shape: nineteen spans in one trace, every agent run under the
+Uses the portable renderer's parser, then checks the exact shape: nineteen spans
+in one trace, every agent run under the
 dispatcher's workflow span, and every model call carrying its model and both token
 counts. Which worker picked up which invoice is not fixed, so nothing here counts
 spans per worker. Exits non-zero when anything is off.
@@ -32,7 +32,7 @@ MODEL_ATTRIBUTES = (
 )
 
 HERE = Path(__file__).resolve().parent
-_SHOW_SPANS_SUFFIX = Path("skills") / "instrument" / "scripts" / "show_spans.py"
+_SHOW_SPANS_SUFFIX = Path("skills") / "convergent-verify" / "scripts" / "show_spans.py"
 # The example ships in two repositories, which nest it at different depths, so the
 # skill directory is found by walking up rather than by a fixed number of parents.
 SHOW_SPANS = next(
@@ -54,10 +54,8 @@ def load_show_spans() -> Any:
 
 
 def read(show_spans: Any, spans_dir: Path) -> list[Any]:
-    report = show_spans.Report()
-    for path in show_spans.resolve(spans_dir):
-        show_spans.read_spans(path, report)
-    return report.spans
+    _, spans = show_spans.read_recording(spans_dir)
+    return spans
 
 
 def problems(spans: list[Any]) -> list[str]:
@@ -100,11 +98,12 @@ def problems(spans: list[Any]) -> list[str]:
 def main(argv: list[str]) -> int:
     spans_dir = Path(argv[0]) if argv else HERE / "spans"
     show_spans = load_show_spans()
-    displayed = show_spans.main([str(spans_dir)])
-    if displayed:
-        return displayed
+    spans = read(show_spans, spans_dir)
+    print("recording:")
+    for line in show_spans.counts(spans):
+        print("  " + line)
 
-    found = problems(read(show_spans, spans_dir))
+    found = problems(spans)
     if found:
         print("\nwrong shape:")
         for line in found:

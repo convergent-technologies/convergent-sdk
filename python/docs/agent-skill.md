@@ -1,62 +1,63 @@
 ---
 title: Instrument with a coding agent
-description: Install the skill that has your coding agent add Convergent tracing to your codebase.
+description: Install two portable skills that add Convergent tracing and inspect one recording.
 ---
 
-The SDK ships an agent skill that tells a coding agent how to instrument your
-agent with Convergent: which calls to wrap, which instrumentation package to
-install for the model client you already import, and how to prove a span
-arrived.
+The SDK ships two portable agent skills.
 
-## Install it
+`convergent-instrument` adds tracing to one Python agent.
+It runs one representative command.
+It works toward an expected recording.
 
-The skill is the `skills/instrument/` directory at the repository root. Copy it
-into your own project.
+`convergent-verify` reads one recording.
+It reports evidence-backed findings.
+It changes no code.
+
+## Install the skills
+
+Use the Skills CLI to install both skills for your coding agent:
 
 ```bash
-cp -r skills/instrument /path/to/your/project/.claude/skills/instrument
+npx skills add convergent-technologies/convergent-sdk
 ```
 
-Then ask the agent to add Convergent tracing to your agent. Claude Code and
-Cursor both read skills from `.claude/skills/`. For another tool, put the
-directory wherever that tool loads skills from.
+Select `convergent-instrument` and `convergent-verify` when prompted.
 
-## What the agent does
+You can also copy each directory from `skills/` into your agent's skills directory.
+Keep both directory names unchanged.
 
-The skill is a four-step workflow.
+The [SDK README](../README.md#instrument-with-a-coding-agent) has prompts for new and
+existing setups.
 
-1. **Plan the coverage.** Read the code and list, in one message, the entry point
-   that handles a request end to end, every model call including retries, every
-   tool, and every sub-agent. Ask you to strike anything you want left out, and
-   raise the judgment calls: which function is the entry point, which id holds
-   still across the turns of a conversation, whether a sub-agent should be its
-   own agent, and whether a prompt or a tool argument must not be recorded.
-2. **Configure.** Install the SDK with your project's own tool, call `init()`
-   once at startup, and derive `release` from something the project already has.
-   Never guess or commit a key.
-3. **Instrument.** Prefer an instrumentation package over a hand-written span,
-   because it hooks the client and catches the streaming and async paths a
-   wrapper misses. The skill carries the package, the version to pin, and the
-   instrumentor class for each model client, and the rules for the seams that go
-   wrong: where a model span has to sit to see the token counts, how to reach a
-   call inside a framework loop, and why two packages must never wrap the same
-   call.
-4. **Verify.** Run `check()`, then run the agent and confirm delivery with the
-   strongest option the environment has: a read API, a local OTLP collector, or a
-   spans file. Count the recorded tree against the plan from step 1 and report
-   what is missing.
+## Instrument one agent
 
-## What is in the directory
+Ask the coding agent to add Convergent tracing to one Python agent.
+Name the agent or source path when the repository contains several agents.
+Name a representative run command when the repository does not make it clear.
 
-`SKILL.md` is the workflow above, and it is the whole of what the agent reads on
-every run.
+The skill performs these actions:
 
-`scripts/show_spans.py` reads a spans file and prints the span count, the
-operations, the agent names, the release, and the token usage, then draws each
-run as a tree. `--expect-agents` and `--expect-tools` turn the plan from step 1
-into a check that exits nonzero and names what is missing. It uses the standard
-library only.
+1. It maps the reachable agent, model, tool, and subagent calls.
+2. It defines the recording expected from the selected command.
+3. It asks which recorded content to exclude.
+4. It adds the smallest supported instrumentation.
+5. It runs the command into a temporary spans directory.
+6. It invokes `convergent-verify` on the recording.
+7. It fixes evidence-backed instrumentation issues.
+8. It repeats until the recording reaches the expected state.
 
-`references/` holds one short file per page of this documentation. Each says what
-its page covers and where the page is, so the agent opens a page when it needs
-one rather than reading all of them.
+The skill uses no retry limit.
+It stops when no instrumentation change can advance the recording.
+It asks for user action when credentials or permission are required.
+
+## Verify a recording
+
+Invoke `convergent-verify` by itself when a recording already exists.
+Pass the spans path and agent name when known.
+Pass the expected recording when one was defined before the run.
+
+The skill renders one agent subtree.
+It includes nested agents with different names.
+It hides recorded content values by default.
+It reports `issue`, `question`, and `fyi` findings.
+It writes no files.

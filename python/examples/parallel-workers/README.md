@@ -119,8 +119,8 @@ Several processes appending to one file relies on append behavior a network
 filesystem does not guarantee, which the
 [`File` destination reference](../../docs/reference/api.md#file) covers.
 Separate files remove the question. `show_spans.py` and `verify.py` both read every
-`spans*.jsonl` in the directory, so a trace split across four files still reads as
-one trace.
+`spans*.jsonl` in the directory. A trace split across four files still reads as one
+trace.
 
 ## What stays the same on every run
 
