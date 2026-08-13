@@ -1,0 +1,82 @@
+# This repository is a mirror. Every file is copied from an internal source
+# tree by a sync job, so a change merged here directly is overwritten by the
+# next sync. This check fails any pull request that did not come from the sync,
+# and its message tells the contributor what happens to their change instead.
+#
+# The check never runs the pull request's code. It reads the pull request's
+# metadata and commit list through the GitHub API and decides from that alone.
+#
+# Known limit: a fork pull request that edits this workflow file runs its
+# edited copy, so it can report its own check as passing. The sync's
+# Sync-Source guard is the backstop; it refuses to sync over anything a merged
+# imposter changed, so the damage stops at the mirror.
+name: Mirror gate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    name: change came through the sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the pull request is a sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMIT_COUNT: ${{ github.event.pull_request.commits }}
+        run: |
+          set -euo pipefail
+
+          explain() {
+            echo "This repository is a mirror of an internal source tree."
+            echo "Every file here is written by a sync job, so a change merged"
+            echo "here directly is overwritten by the next sync."
+            echo ""
+            echo "Reason this pull request is not from the sync: $1"
+            echo ""
+            echo "What to do instead: keep this pull request open. A maintainer"
+            echo "will carry the change into the internal source with"
+            echo "Co-authored-by credit, and it will appear here in a following"
+            echo "sync. There is no need to change anything on this pull request."
+            echo ""
+            echo "Dependency update bots hit this check too, by design. A bump"
+            echo "proposed here is ported to the internal source the same way,"
+            echo "so a failing Dependabot pull request is an alert, and it is"
+            echo "acted on, just not merged here."
+            exit 1
+          }
+
+          if [ "$HEAD_REPO" != "$REPO" ]; then
+            explain "the branch lives on a fork ($HEAD_REPO), and the sync only pushes branches to this repository"
+          fi
+
+          case "$HEAD_REF" in
+            sync/*) ;;
+            *) explain "the branch is named $HEAD_REF, and the sync only uses branches starting with sync/" ;;
+          esac
+
+          # Fail closed: if the API call fails, set -e stops the job here, and
+          # a truncated listing is caught by counting what came back against
+          # the pull request's own commit count.
+          emails=$(gh api "repos/$REPO/pulls/$PR_NUMBER/commits" --paginate \
+            --jq '.[].commit.author.email')
+          checked=$(printf '%s\n' "$emails" | grep -c . || true)
+          if [ "$checked" -ne "$COMMIT_COUNT" ]; then
+            explain "the check could read only $checked of the pull request's $COMMIT_COUNT commits, so it cannot verify them"
+          fi
+
+          bad=$(printf '%s\n' "$emails" | grep -v '@convergent\.dev$' || true)
+          if [ -n "$bad" ]; then
+            explain "a commit author email is not @convergent.dev ($(echo "$bad" | head -1))"
+          fi
+
+          echo "This pull request came from the sync: branch $HEAD_REF on $REPO,"
+          echo "all $checked commits authored under @convergent.dev."
