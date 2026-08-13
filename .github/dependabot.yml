@@ -1,0 +1,9 @@
+# Keeps the SHA-pinned actions in .github/workflows fresh. Runtime Python
+# dependencies are deliberately not managed here: they are compatible ranges
+# in python/pyproject.toml and move by hand, in the monorepo, with a review.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

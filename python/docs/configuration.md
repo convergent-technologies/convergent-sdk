@@ -51,6 +51,10 @@ to two files and one warning says so.
 `CONVERGENT_TRACES_EXPORTER=console` adds a destination rather than replacing
 the others, so you can read what you are sending while still sending it.
 
+`CONVERGENT_DEBUG` combines with the `debug` argument. Either one turns debug
+logging on, so setting the variable enables it even when the code passes
+`debug=False`.
+
 `CONVERGENT_ENDPOINT` is for a receiver of your own, such as a customer-hosted
 data plane or a collector running beside your process. A value that is not a URL
 is rejected at `init()`.

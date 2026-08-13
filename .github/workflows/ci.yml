@@ -7,6 +7,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml runs these same jobs as its pre-publish gate.
+  workflow_call:
 
 env:
   UV_VERSION: "0.11.14"
@@ -22,6 +24,8 @@ jobs:
         working-directory: python
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Install uv
         run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
       - name: Sync environment
@@ -29,6 +33,23 @@ jobs:
       - run: uv run ruff check src tests
       - run: uv run pyright
       - run: uv run pytest
+
+  # The artifacts a customer installs: metadata must render (twine) and the
+  # wheel must hold exactly the package (check-wheel-contents).
+  artifacts:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install uv
+        run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+      - run: uv build
+      - run: uvx 'twine==7.0.0' check --strict dist/*
+      - run: uvx 'check-wheel-contents==0.6.3' dist/*.whl
 
   # The suite against the oldest OpenTelemetry train the package metadata allows.
   # Two tests need newer releases and are excluded here: drop counting needs
@@ -41,6 +62,8 @@ jobs:
         working-directory: python
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - name: Install uv
         run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
       - name: Install at the floor

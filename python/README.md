@@ -9,6 +9,11 @@ Convergent workspace.
 pip install convergent-sdk
 ```
 
+In a project that pins its dependencies, use `convergent-sdk>=0.0.5,<0.1`.
+While the SDK is on 0.x, a minor release may change the public API, and the
+upper bound keeps such a release out of a routine dependency update.
+[Stability](docs/stability.md) states the full policy.
+
 ## Set your key
 
 Mint an ingestion key at
