@@ -16,52 +16,53 @@ Mint an ingestion key at
 
 ```bash
 export CONVERGENT_API_KEY="cvk_xxxxxxxxxxxxxxxx"
+
+# Optional
 export GIT_SHA=$(git rev-parse --short HEAD)
 ```
 
-`CONVERGENT_API_KEY` is the only environment variable the SDK requires. The export is the
-local form. In a deployment the key belongs in your secrets manager or your platform's
-environment configuration.
+`CONVERGENT_API_KEY` is required. The export works for local development. In a deployment, you'll want the key wherever you store secrets or your environment variables.
 
-`GIT_SHA` is this page's way of naming a release: `init(release=...)` below takes it, and
-it ties every trace to the version of your code that produced it. Any string that names a
-version works: a git sha, a build id, an image tag, a date.
+`GIT_SHA` is an example environment variable name you can use to describe a release when initializing convergent with: `init(release=...)`. Note that describing a release is optional.
 
 ## Instrument with a coding agent
 
-If you use Claude Code, Codex, Cursor, or another coding agent, install the two skills and
-ask the agent to add Convergent tracing:
+If you're instrumenting Convergent for the first time, the fastest way to do so is give your coding agent this prompt.
+
+```text
+Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk. 
+
+convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given the agent file or directory to instrument, as well as instructions / a command that runs the agent to inspect the representative run. Use both skills to instrument and verify your agent. Continue using both skills until the record has no unresolved instrumentation issue.
+
+<Insert agent file or directory to instrument>
+<Insert instructions or command to run and inspect the agent>
+```
+
+If you've already instrumented with Convergent, and are just looking to verify your setup, give your coding agent this prompt:
+
+```text
+Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
+
+convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given instructions on the agents/directory that has already been instrumented, as well as instructions / a command that runs the agent(s) to inspect the representative run(s). Use both skills to verify the existing instrumentation, and if necessary re-instrument and fix an existing setup.
+
+<Insert agent file or directory that has been instrumented and should be verified>
+<Insert instructions or command to run and inspect the agent>
+```
+
+Alternatively, you can also install the skills directly in your coding agent using:
 
 ```bash
 npx skills add convergent-technologies/convergent-sdk
 ```
 
-Install `convergent-instrument` and `convergent-verify` when the installer asks. The first
-skill instruments one representative path. The second skill reads the resulting recording
-without changing code. The section below is the same instrumentation done by hand.
+You'll have to restart your coding agent session to use the skills directly, but can do so with slash commands:
 
-For a new setup, give your coding agent this prompt:
-
-```text
-Install convergent-instrument and convergent-verify from convergent-technologies/convergent-sdk.
-Use convergent-instrument to instrument the agent in <agent file or directory>.
-Use <command that runs the agent> as the representative run.
-Use convergent-verify to inspect each recording.
-Continue until the recording has no unresolved instrumentation issue.
+```
+/convergent-instrument
+/convergent-verify
 ```
 
-For an existing setup, give your coding agent this prompt:
-
-```text
-Install convergent-instrument and convergent-verify from convergent-technologies/convergent-sdk.
-Use convergent-instrument and convergent-verify to review the existing Convergent
-instrumentation for the agent in <agent file or directory>.
-Use <command that runs the agent> as the representative run.
-Fix each evidence-backed instrumentation issue.
-Rerun and verify until the expected recording is complete.
-```
-
-## Trace a run
+## Example: Trace a run
 
 Call `init()` once at startup, and put `agent()` on the function that handles one request.
 The model call inside it is the one your app already makes, and this one is the OpenAI
@@ -100,26 +101,19 @@ print(answer("Where is my invoice?"))
 convergent.flush()
 ```
 
+From your command line, run:
 ```bash
 pip install openai
 export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
-GIT_SHA=$(git rev-parse --short HEAD) python app.py
+export GIT_SHA=$(git rev-parse --short HEAD)
+python app.py
 ```
 
 That records one agent run with one model call inside it, carrying the prompt, the answer,
 the model, and the token counts. Any other model client goes in the same place, and the
 trace keeps the same shape.
 
-## Documentation
-
-This README is the companion document to
-[github.com/convergent-technologies/convergent-sdk](https://github.com/convergent-technologies/convergent-sdk),
-and everything past this point lives there.
-
-```bash
-git clone https://github.com/convergent-technologies/convergent-sdk
-```
-
+## Full Documentation
 The full documentation is under `python/docs/`: confirming a run arrived with `check()`,
 instrumenting your agent by hand, attaching to an existing OpenTelemetry setup, the
 integration packages, configuration, the API reference, the attribute spellings Convergent
