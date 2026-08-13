@@ -30,12 +30,12 @@ export GIT_SHA=$(git rev-parse --short HEAD)
 If you're instrumenting Convergent for the first time, the fastest way to do so is give your coding agent this prompt.
 
 ```text
-Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk. 
+Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
 
-convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given the agent file or directory to instrument, as well as instructions / a command that runs the agent to inspect the representative run. Use both skills to instrument and verify your agent. Continue using both skills until the record has no unresolved instrumentation issue.
+convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given the agent file or directory to instrument, as well as the instructions or command that runs the agent for the representative run. Use both skills to instrument and verify your agent. Continue using both skills until the recording has no unresolved instrumentation issue.
 
-<Insert agent file or directory to instrument>
-<Insert instructions or command to run and inspect the agent>
+Agent to instrument: <file or directory>
+Representative run: <command or instructions that run the agent>
 ```
 
 If you've already instrumented with Convergent, and are just looking to verify your setup, give your coding agent this prompt:
@@ -43,10 +43,10 @@ If you've already instrumented with Convergent, and are just looking to verify y
 ```text
 Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
 
-convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given instructions on the agents/directory that has already been instrumented, as well as instructions / a command that runs the agent(s) to inspect the representative run(s). Use both skills to verify the existing instrumentation, and if necessary re-instrument and fix an existing setup.
+convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given the agent file or directory that is already instrumented, as well as the instructions or command that runs the agent for the representative run. Use both skills to verify the existing instrumentation, and fix each evidence-backed instrumentation issue. Rerun and verify until the recording has no unresolved instrumentation issue.
 
-<Insert agent file or directory that has been instrumented and should be verified>
-<Insert instructions or command to run and inspect the agent>
+Agent to verify: <file or directory that is already instrumented>
+Representative run: <command or instructions that run the agent>
 ```
 
 Alternatively, you can also install the skills directly in your coding agent using:
