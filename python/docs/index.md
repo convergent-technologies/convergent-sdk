@@ -142,4 +142,5 @@ model call carrying the prompt, the answer, and its token counts.
 - [Instrument your agent](instrument.md): tools, sub-steps, and recording what went in and out.
 - [Already using OpenTelemetry](opentelemetry.md): what `init()` does when a tracer provider already exists, and the agent filter.
 - [Configuration](configuration.md): environment variables, destinations, and runtime behavior.
+- [Stability](stability.md): what counts as public API, what a version bump may change, and what to pin.
 - [Troubleshooting](troubleshooting.md): nothing arriving, split traces, missing agents.

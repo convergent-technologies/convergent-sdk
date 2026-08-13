@@ -1,0 +1,98 @@
+# Runs the suite against the newest dependency versions once a week, off the
+# pull request path. A red run here means a new upstream release broke the SDK
+# before any of our own changes did, and the failure job files the issue.
+#
+# These jobs execute freshly released third-party code, and no workflow in this
+# repository restores GitHub Actions caches. That is load-bearing: cache writes
+# need no permissions grant, default-branch cache entries are restorable by
+# every workflow, and the release workflow publishes to PyPI, so adding cache
+# restore here (e.g. setup-uv with enable-cache) would connect code run in
+# these jobs to the publish path.
+name: Weekly newest deps
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+env:
+  UV_VERSION: "0.11.14"
+
+jobs:
+  # Everything resolved to its newest compatible version.
+  newest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install uv
+        run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+      - name: Sync environment at the newest resolution
+        run: uv sync --python 3.13 --upgrade
+      - run: uv run --no-sync pytest
+
+  # The OpenTelemetry train and pydantic-ai forced to their newest releases,
+  # in case the resolver held either back on another package's account.
+  otel-head:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install uv
+        run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+      - name: Sync environment
+        run: uv sync --python 3.13 --upgrade
+      - name: Force the newest OpenTelemetry and pydantic-ai
+        run: |
+          uv pip install --upgrade \
+            opentelemetry-api \
+            opentelemetry-sdk \
+            opentelemetry-exporter-otlp-proto-http \
+            opentelemetry-instrumentation \
+            opentelemetry-semantic-conventions \
+            pydantic-ai-slim
+      - run: uv run --no-sync pytest
+
+  # Opens one issue per failed leg, unless that leg already has one open.
+  file-issue:
+    runs-on: ubuntu-latest
+    needs: [newest, otel-head]
+    if: failure()
+    permissions:
+      issues: write
+    steps:
+      - name: File an issue for each failed leg
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NEWEST_RESULT: ${{ needs.newest.result }}
+          OTEL_HEAD_RESULT: ${{ needs.otel-head.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          file_one() {
+            leg="$1"
+            title="Weekly newest-deps run failed: $leg"
+            open_count=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq 'length')
+            if [ "$open_count" -gt 0 ]; then
+              echo "an open issue already tracks $leg"
+              return
+            fi
+            # shellcheck disable=SC2016 # the backticks are markdown, not expansion
+            body=$(printf 'The scheduled newest-dependencies run failed on the `%s` leg.\n\nRun: %s\n\nA new release of a dependency likely broke the SDK. The run log names the versions installed.' "$leg" "$RUN_URL")
+            gh issue create --title "$title" --body "$body"
+          }
+          [ "$NEWEST_RESULT" = "failure" ] && file_one "newest"
+          [ "$OTEL_HEAD_RESULT" = "failure" ] && file_one "otel-head"
+          true

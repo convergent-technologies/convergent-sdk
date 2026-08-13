@@ -1,7 +1,4 @@
-# This repository is a mirror. Every file is copied from an internal source
-# tree by a sync job, so a change merged here directly is overwritten by the
-# next sync. This check fails any pull request that did not come from the sync,
-# and its message tells the contributor what happens to their change instead.
+# This repository is a mirror; see CONTRIBUTING.md for the contribution path.
 #
 # The check never runs the pull request's code. It reads the pull request's
 # metadata and commit list through the GitHub API and decides from that alone.
