@@ -1,49 +1,84 @@
 ---
 title: Get started
-description: Install the SDK, set your key, and confirm a run reaches your workspace.
+description: Install the SDK, set your key, and instrument your agent with the coding-agent skills.
 ---
 
-This page covers installing the SDK, setting your key, recording one agent run,
-and confirming that the run reached your workspace.
+The SDK's source, skills, and examples live at
+[github.com/convergent-technologies/convergent-sdk](https://github.com/convergent-technologies/convergent-sdk).
+If a coding agent is doing the instrumentation, point it at that repository
+first; the prompts below do exactly that.
 
-### 1. Install
+## Install
 
 ```bash
 pip install convergent-sdk
 ```
 
-With uv, `uv add convergent-sdk`. With poetry, `poetry add convergent-sdk`.
+In a project that pins its dependencies, use `convergent-sdk>=0.0.4,<0.1`.
+While the SDK is on 0.x, a minor release may change the public API, and the
+upper bound keeps such a release out of a routine dependency update.
+[Stability](stability.md) states the full policy.
 
-The package brings the OpenTelemetry pieces it needs.
-[What gets installed](configuration.md#what-gets-installed) lists them.
-
-### 2. Set your key
+## Set your key
 
 Mint an ingestion key at
 [app.convergent.dev/workspace/settings](https://app.convergent.dev/workspace/settings).
 
 ```bash
 export CONVERGENT_API_KEY="cvk_xxxxxxxxxxxxxxxx"
+
+# Optional
 export GIT_SHA=$(git rev-parse --short HEAD)
 ```
 
-The export is the local form. In a deployment the key belongs in your secrets
-manager or your platform's environment configuration.
+`CONVERGENT_API_KEY` is required. The export works for local development. In a deployment, you'll want the key wherever you store secrets or your environment variables.
 
-`GIT_SHA` is the release. It links a trace to the version of your code that
-produced it, and it is how you compare two versions later. A git sha is the usual
-choice, and any string that names a version works: a build id, an image tag, a
-date.
+`GIT_SHA` is an example environment variable name you can use to describe a release when initializing convergent with: `init(release=...)`. Note that describing a release is optional.
 
-### 3. Trace a run
+## Instrument with a coding agent
 
-The SDK ships an agent skill that helps a coding agent instrument your code
-with the SDK. [Instrument with a coding agent](agent-skill.md) covers
-installing and using it. This step shows the same work by hand.
+If you're instrumenting Convergent for the first time, the fastest way to do so is give your coding agent this prompt.
 
-Call `init()` once at startup, and put `agent()` on the function that handles one
-request. The model call inside it is the one your app already makes, and this one
-is the OpenAI client. Save it as `app.py`.
+```text
+Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
+
+convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given the agent file or directory to instrument, as well as the instructions or command that runs the agent for the representative run. Use both skills to instrument and verify your agent. Continue using both skills until the recording has no unresolved instrumentation issue.
+
+Agent to instrument: <file or directory>
+Representative run: <command or instructions that run the agent>
+```
+
+If you've already instrumented with Convergent, and are just looking to verify your setup, give your coding agent this prompt:
+
+```text
+Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
+
+convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given the agent file or directory that is already instrumented, as well as the instructions or command that runs the agent for the representative run. Use both skills to verify the existing instrumentation, and fix each evidence-backed instrumentation issue. Rerun and verify until the recording has no unresolved instrumentation issue.
+
+Agent to verify: <file or directory that is already instrumented>
+Representative run: <command or instructions that run the agent>
+```
+
+Alternatively, you can also install the skills directly in your coding agent using:
+
+```bash
+npx skills add convergent-technologies/convergent-sdk
+```
+
+You'll have to restart your coding agent session to use the skills directly, but can do so with slash commands:
+
+```
+/convergent-instrument
+/convergent-verify
+```
+
+[Instrument with a coding agent](agent-skill.md) describes what each skill does.
+
+## Example: Trace a run
+
+Call `init()` once at startup, and put `agent()` on the function that handles one request.
+The model call inside it is the one your app already makes, and this one is the OpenAI
+client. Save it as `app.py`.
 
 ```python
 import os
@@ -58,7 +93,7 @@ client = OpenAI()
 MODEL = "gpt-5.5"
 
 
-@convergent.agent(name="convergent-demo")
+@convergent.agent(name="support-agent")
 def answer(question: str) -> str:
     with convergent.span(name=MODEL, operation="model_call") as call:
         call.set_input({"question": question})
@@ -78,69 +113,30 @@ print(answer("Where is my invoice?"))
 convergent.flush()
 ```
 
+From your command line, run:
+
 ```bash
 pip install openai
 export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
+export GIT_SHA=$(git rev-parse --short HEAD)
 python app.py
 ```
 
-That records one agent run with one model call inside it, carrying the prompt,
-the answer, the model, and the token counts. The counts come off the response, so
-the span has to be open around the call that returns it. Any other model client
-goes in the same place, and the trace keeps the same shape.
+That records one agent run with one model call inside it, carrying the prompt, the answer,
+the model, and the token counts. Any other model client goes in the same place, and the
+trace keeps the same shape.
 
-### 4. Confirm it arrived
+## The rest of this documentation
 
-`init()` rejects a setup that cannot work: a missing key, a missing release, a
-bad value. By default the problem is logged at ERROR and tracing is disabled;
-set `CONVERGENT_STRICT=1` to make it raise and stop the process at startup
-instead. A setup it accepts can still fail to deliver
-quietly, and `check()` reports what
-this process configured and then asks the server what it can see.
+[Instrument](instrument.md) covers confirming a run arrived with `check()` and
+instrumenting your agent by hand. [OpenTelemetry](opentelemetry.md) covers
+attaching to an existing OpenTelemetry setup, and [Integrations](integrations/index.md)
+the integration packages. The reference section holds
+[configuration](configuration.md), the [API reference](reference/api.md), the
+[attribute spellings Convergent reads](reference/attributes.md), and
+[troubleshooting](troubleshooting.md).
 
-Call it after `init()` has run. It reads the configuration of the process it is
-called from, so a separate script or a fresh shell reports `disabled` however
-well your app is set up.
-
-```python
-print(convergent.check())
-```
-
-```
-convergent: enabled
-  release     f114ac54b
-  mode        a tracer provider we created
-  sending to  convergent
-
-  round trip  ok (146ms)
-  key         org_30f981e207bf3b38
-  agents      convergent-demo
-
-  no notes
-```
-
-- `round trip ok` means the server answered this process.
-- `key` shows the organization the key belongs to.
-- `agents` lists the agent names the server has seen from you, so your own name
-  appearing there is the proof that the trace arrived.
-- `no notes` means nothing needs your attention.
-
-The `release` line echoes the version you set in step 2.
-
-Anything else, and [Troubleshooting](troubleshooting.md) reads the report for you.
-
-### 5. Look at it
-
-Open [app.convergent.dev/workspace](https://app.convergent.dev/workspace).
-
-Click the run to see the agent span with the model call nested under it, and the
-model call carrying the prompt, the answer, and its token counts.
-
-## What to read next
-
-- [Instrument with a coding agent](agent-skill.md): the skill that tells a coding agent how to add the tracing.
-- [Instrument your agent](instrument.md): tools, sub-steps, and recording what went in and out.
-- [Already using OpenTelemetry](opentelemetry.md): what `init()` does when a tracer provider already exists, and the agent filter.
-- [Configuration](configuration.md): environment variables, destinations, and runtime behavior.
-- [Stability](stability.md): what counts as public API, what a version bump may change, and what to pin.
-- [Troubleshooting](troubleshooting.md): nothing arriving, split traces, missing agents.
+The [GitHub repository](https://github.com/convergent-technologies/convergent-sdk)
+holds the skills from the coding-agent section above and runnable examples: the
+run above as a self-contained file that needs no OpenAI key, and one trace
+recorded across a dispatcher and three worker processes.

@@ -54,7 +54,7 @@ same. There are no deprecated names today.
 ## What to pin
 
 ```
-convergent-sdk>=0.0.5,<0.1
+convergent-sdk>=0.0.4,<0.1
 ```
 
 The upper bound holds you on the 0.0.x line, where every release is
