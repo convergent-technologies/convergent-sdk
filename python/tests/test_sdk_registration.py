@@ -167,7 +167,7 @@ def test_the_environment_turns_debug_on_even_when_the_argument_is_false(
     monkeypatch: pytest.MonkeyPatch, exporter: InMemorySpanExporter
 ) -> None:
     """configuration.md: CONVERGENT_DEBUG combines with the argument, so the
-    operator can turn debug logging on without a code change (CON-2822)."""
+    operator can turn debug logging on without a code change."""
     _record_posts(monkeypatch)
     monkeypatch.setenv("CONVERGENT_DEBUG", "1")
 
