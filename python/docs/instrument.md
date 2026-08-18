@@ -1,5 +1,5 @@
 ---
-title: Instrument your agent
+title: Instrument
 description: Mark the agent run, the tool calls, and the steps in between.
 ---
 

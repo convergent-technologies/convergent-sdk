@@ -13,6 +13,7 @@ When internet access exists, read the matching public SDK page before editing:
 - [Troubleshooting](https://github.com/convergent-technologies/convergent-sdk/blob/stable/python/docs/troubleshooting.md)
 
 Read the installed `convergent-sdk` version and package source.
+If no version constraint exists, upgrade to the latest release with the project's package manager.
 Read the installed instrumentation package metadata and source.
 Use the installed API when it conflicts with a newer example.
 Report a version mismatch before using a missing API.
