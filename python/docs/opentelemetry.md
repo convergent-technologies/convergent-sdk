@@ -87,9 +87,9 @@ mark first, then from the span's own attributes, then from the resource
 attributes. `reject_span_attributes` decides first: one matching key withholds
 the span. `require_span_attributes` decides next: the span is forwarded only
 when every named key holds an allowed value.
-`require_span_attributes={"customer.id": ["acme"]}` sends a span only when its
+`require_span_attributes={"customer.id": "acme"}` sends a span only when its
 customer key is `acme`, so an excluded customer's traffic stays in your
-process. `reject_span_attributes={"customer.id": ["internal-test"]}` withholds
+process. `reject_span_attributes={"customer.id": "internal-test"}` withholds
 that customer's spans and sends everything else, unmarked spans included. An
 unmarked span never passes `require_span_attributes`. Comparison is exact, by
 type and case. A list-valued or enum-valued span attribute never matches, so

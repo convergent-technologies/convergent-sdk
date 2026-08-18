@@ -246,7 +246,7 @@ def _summary(span: Span) -> str:
     return "  ".join(parts)
 
 
-def counts(spans: list[Span]) -> list[str]:
+def counts(spans: list[Span], total: int) -> list[str]:
     roles = Counter(span.role for span in spans)
     operations = Counter(span.operation or "(unset)" for span in spans)
     scopes = Counter(span.scope for span in spans)
@@ -275,7 +275,9 @@ def counts(spans: list[Span]) -> list[str]:
         if key.startswith(MARK_PREFIX)
     )
     return [
-        f"selected spans: {len(spans)}",
+        # The whole-file count sits beside the selection so a filter that
+        # withheld another agent's spans is visible from this line alone.
+        f"selected spans: {len(spans)} of {total} in the file",
         f"traces: {len({span.trace_id for span in spans})}",
         f"agent runs: {roles[AGENT_RUN]}",
         f"model calls: {roles[MODEL_CALL]}",
@@ -376,7 +378,7 @@ def main(argv: list[str]) -> int:
         f"({len(roots)} run{'s' if len(roots) != 1 else ''})"
     )
     print("counts:")
-    for line in counts(selected):
+    for line in counts(selected, total=len(spans)):
         print(f"  {line}")
     print("tree:")
     for line in render_tree(selected, show_content=args.show_content, full=args.full):

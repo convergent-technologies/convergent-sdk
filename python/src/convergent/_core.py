@@ -183,7 +183,7 @@ def init(
 
     ``require_span_attributes`` maps attribute names to the values a span must
     hold to be sent, e.g.
-    ``require_span_attributes={"customer.id": ["acme", "globex"]}``.
+    ``require_span_attributes={"customer.id": "acme"}``.
     ``reject_span_attributes`` maps attribute names to the values that
     withhold a span, and it decides first: a span holding any rejected pair is
     not sent, whatever ``require_span_attributes`` says. The filter reads each

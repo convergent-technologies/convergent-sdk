@@ -20,9 +20,11 @@ When internet access exists, read the current docs first.
 Read the installed `convergent-sdk` version and use its tag in the doc URLs.
 Fetch `https://raw.githubusercontent.com/convergent-technologies/convergent-sdk/v<version>/python/docs/meta.json` to list the doc pages.
 Fetch the matching page from `https://raw.githubusercontent.com/convergent-technologies/convergent-sdk/v<version>/python/docs/<page>.md`.
-When the tag fetch fails, fetch the same paths from `main` instead.
+When the tag fetch returns 404, fetch the same paths from `main` instead.
+An unreleased version carries no tag, so treat that 404 as normal.
 Do not guess a page name.
 When a fetched page and [references/python.md](references/python.md) disagree, trust the fetched page.
+When a fetched page omits an API that [references/python.md](references/python.md) names, use the reference and the installed source.
 When a fetch fails, use [references/python.md](references/python.md) and the installed package source, and do not retry.
 Inspect the installed package version and source before using an API.
 Use installed code for exact imports and signatures.
@@ -40,6 +42,18 @@ Limit edits to the target call graph.
 Do not change application control flow, response behavior, runtime, or deployment configuration.
 Do not create an application abstraction only for tracing.
 Require verification after code changes.
+When no user can answer, choose the reversible option and record the decision in the report.
+When you cannot invoke `convergent-verify`, run `scripts/show_spans.py` from its skill directory.
+
+## Tag a run for filtering
+
+A tag must reach the run and its child spans before you add a filter.
+Pass `context_attributes={"<key>": value}` on the `span()` that opens the run.
+When the tag value varies per request, open the run with `span()`, not a decorator.
+A decorator's `context_attributes=` mapping is fixed when the module loads.
+Do not tag a run with `set_attribute()`.
+`set_attribute()` writes one span, so a filter orphans or leaks the children.
+Prove each new or changed filter with the recipe in [references/python.md](references/python.md).
 
 ## Phase 0: Explore
 
@@ -131,6 +145,7 @@ State the required nesting.
 State the conversation identifier when the agent has multiple turns.
 State the required content fields.
 State the release source.
+Name each request a filter must keep and each request a filter must withhold.
 
 Treat unexecuted source branches as outside this recording.
 Wrap each executed tool once.
@@ -155,6 +170,7 @@ Continue while the evidence supports another instrumentation fix.
 Use no pass limit.
 Make a new fix before repeating a command with unchanged evidence.
 Keep unrelated application behavior outside this loop.
+When the user requests one change to working instrumentation, report other gaps as `fyi` and leave them unfixed.
 
 Route an `issue` to an instrumentation fix.
 Route a `question` to the user.
@@ -165,9 +181,11 @@ Keep a dismissed finding closed for the rest of the session.
 
 Return `complete` when the command writes the final expected recording.
 Require `convergent-verify` to report no unresolved instrumentation issue.
+Do not return `complete` after a filter change without a recording that proves both directions.
 Call `convergent.check()` in the initialized process when the run uses an API key.
 Print the report.
-Remove temporary check output after verification.
+Remove the temporary check code after verification.
+Keep the printed report in your final message.
 Report local recording success separately from hosted delivery success.
 Do not claim hosted delivery without a successful round trip and the target agent name.
 Show the edited files and one reason for each file.
