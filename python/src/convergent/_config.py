@@ -11,6 +11,7 @@ spans file the caller asked for, because opening it is the check.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Iterable, Sequence
@@ -21,6 +22,7 @@ from urllib.parse import urlsplit
 
 from opentelemetry.sdk.trace import TracerProvider
 
+from . import _policy
 from ._destinations import Console, Destination, File, _type_name
 
 logger = logging.getLogger("convergent.sdk")
@@ -58,6 +60,10 @@ class _Config:
     destinations: tuple[Destination, ...] = ()
     # None means no filtering; an empty tuple is a declaration matching no span.
     agents: tuple[str, ...] | None = None
+    # Built from init(require_span_attributes=) and init(reject_span_attributes=)
+    # at validation time, so a malformed value raises the way a malformed
+    # agents= does. None means no filtering.
+    policy: _policy.Policy | None = None
     # TracerProvider defines no __eq__, so this field compares by identity.
     tracer_provider: TracerProvider | None = None
 
@@ -68,6 +74,8 @@ def _validated_config(
     endpoint: object,
     release: object,
     agents: object,
+    require_span_attributes: object,
+    reject_span_attributes: object,
     destinations: object,
     tracer_provider: object,
     debug: object,
@@ -87,6 +95,7 @@ def _validated_config(
     provider = _require_provider("tracer_provider", tracer_provider)
     given = _destinations_given(destinations)
     names = _agent_names(agents)
+    policy = _resolved_policy(require_span_attributes, reject_span_attributes)
 
     _check_flag_env("CONVERGENT_DEBUG")
     _check_flag_env("CONVERGENT_STRICT")
@@ -106,6 +115,7 @@ def _validated_config(
         release=_required_release(resolved_release),
         destinations=_resolve_destinations(given, _clean(os.environ.get("CONVERGENT_SPANS_DIR"))),
         agents=names,
+        policy=policy,
         tracer_provider=provider,
     )
 
@@ -116,6 +126,8 @@ def _processor_config(
     endpoint: object,
     release: object,
     agents: object,
+    require_span_attributes: object,
+    reject_span_attributes: object,
     tracer_provider: object,
     strict: object,
 ) -> _Config:
@@ -131,6 +143,7 @@ def _processor_config(
     _check_flag_env("CONVERGENT_STRICT")
     provider = _require_provider("tracer_provider", tracer_provider)
     names = _agent_names(agents)
+    policy = _resolved_policy(require_span_attributes, reject_span_attributes)
     key, resolved_endpoint, resolved_release = _resolved_credentials(api_key, endpoint, release)
     if not key:
         raise ValueError(
@@ -144,6 +157,7 @@ def _processor_config(
         endpoint=resolved_endpoint,
         release=_required_release(resolved_release),
         agents=names,
+        policy=policy,
         tracer_provider=provider,
     )
 
@@ -165,6 +179,38 @@ def _resolved_credentials(
     _check_endpoint(resolved_endpoint)
     resolved_release = _clean(release) or _clean(os.environ.get("CONVERGENT_RELEASE")) or None
     return key, resolved_endpoint, resolved_release
+
+
+def _resolved_policy(
+    require_span_attributes: object, reject_span_attributes: object
+) -> _policy.Policy | None:
+    """The filter policy, each direction resolved against the environment.
+
+    The argument wins the way ``api_key`` wins over ``CONVERGENT_API_KEY``:
+    the variable fills a direction in only when its argument is absent. The
+    resolved mappings go through the same ``_policy.build`` an argument does,
+    so a variable holding the wrong shape fails the way the argument would.
+    """
+    return _policy.build(
+        _filter_env(require_span_attributes, "CONVERGENT_REQUIRE_SPAN_ATTRIBUTES"),
+        _filter_env(reject_span_attributes, "CONVERGENT_REJECT_SPAN_ATTRIBUTES"),
+    )
+
+
+def _filter_env(argument: object, variable: str) -> object:
+    if argument is not None:
+        return argument
+    value = _clean(os.environ.get(variable))
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except ValueError as error:
+        raise ValueError(
+            f"{variable} is not JSON; it takes a JSON object such as "
+            '{"customer.id": ["acme"]}. The configured value is not echoed '
+            "here in case it holds a secret by mistake"
+        ) from error
 
 
 def _required_release(resolved: str | None) -> str:

@@ -3,7 +3,7 @@
 ``api_key`` already implies the Convergent destination. ``endpoint`` can override
 its managed address. The same address registers the deployment and receives
 spans. Anything in ``init(destinations=...)`` is *added* on top, and every span
-goes to all of them.
+the filters keep goes to all of them.
 
 These are inert descriptions, not exporters. ``_core`` turns each one into a span
 processor when ``init()`` runs, so constructing one opens no descriptor and makes
@@ -40,7 +40,7 @@ def _type_name(value: object) -> str:
 
 @dataclass(frozen=True)
 class File:
-    """Write every span to ``<path>/<filename>`` as OTLP/JSON, one span per line.
+    """Write every span the filters keep to ``<path>/<filename>`` as OTLP/JSON, one span per line.
 
     A ``File`` on its own is a complete configuration: no credentials, and
     nothing sent over the network at all. That is what makes a sandbox with no
@@ -94,7 +94,7 @@ class File:
 
 @dataclass(frozen=True)
 class Console:
-    """Write every span to stdout or stderr as OTLP/JSON.
+    """Write every span the filters keep to stdout or stderr as OTLP/JSON.
 
     Two uses. While developing, it shows exactly what is being sent without
     standing up a collector. In Lambda, Cloud Run, or Modal it is a *transport*:

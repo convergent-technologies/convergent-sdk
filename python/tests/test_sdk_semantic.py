@@ -1046,7 +1046,7 @@ def test_a_rejected_attribute_is_reported_and_dropped(
     # Two reasons, not three reports: both reserved keys share the
     # ``reserved_attribute`` reason, and reporting is keyed on the reason so the
     # set cannot grow with caller input. Every attribute is still dropped.
-    ignored = [r for r in caplog.records if "ignored the attribute" in r.getMessage()]
+    ignored = [r for r in caplog.records if "ignored the set_attribute()" in r.getMessage()]
     reasons = {r.getMessage().split(":")[1].strip() for r in ignored}
     assert len(ignored) == 2, f"one report per reason, got {len(ignored)}"
     assert len(reasons) == 2, "a reserved key and a bad value type are distinct reasons"

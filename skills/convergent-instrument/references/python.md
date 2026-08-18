@@ -38,6 +38,12 @@ Do not create a second tracer provider.
 Do not replace existing span processors, samplers, resources, or exporters.
 
 Use `agents=[...]` when Convergent attaches to an existing provider.
+If each request carries a span attribute, a resource attribute, or a
+`context_attributes=` mark for the key, use `require_span_attributes={...}` to send only spans
+with allowed values, or `reject_span_attributes={...}` to withhold spans with named values.
+Mark each request with `context_attributes=` on `span()` before you add `require_span_attributes=`.
+If no source holds the key, `require_span_attributes=` sends nothing to Convergent or to a
+`File` or `Console` destination. An unmarked span under `reject_span_attributes=` is sent.
 Match each filter name to `gen_ai.agent.name` exactly.
 Remember that existing exporters also receive recorded content.
 

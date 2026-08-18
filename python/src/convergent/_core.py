@@ -15,7 +15,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, SpanProcessor, TracerProvider
 
-from . import _egress, _registry, _semantic, _transport
+from . import _processors, _registry, _semantic, _transport
 from ._config import (
     _FLAG_ON,
     _clean,
@@ -118,7 +118,7 @@ _state = Snapshot()
 _config: _Config | None = None
 _startup_failure: _StartupFailure | None = None
 _dropped: TracerProvider | None = None
-_processors: list[SpanProcessor] = []
+_drain: list[SpanProcessor] = []
 #: Asked which provider carries the span processor a caller added themselves. Set
 #: by :func:`_adopt`, and ``None`` for every other way of configuring tracing.
 _provider_source: Callable[[], TracerProvider | None] | None = None
@@ -148,6 +148,8 @@ def init(
     endpoint: str | None = None,
     release: str | None = None,
     agents: list[str] | None = None,
+    require_span_attributes: Mapping[str, object] | None = None,
+    reject_span_attributes: Mapping[str, object] | None = None,
     destinations: Sequence[Destination] = (),
     tracer_provider: TracerProvider | None = None,
     debug: bool = False,
@@ -163,18 +165,42 @@ def init(
     ``agents`` names the agents Convergent is allowed to see. Name them and we send
     those agents' spans and everything that happens inside their runs, including
     tool calls and database queries. Anything outside an agent run stays in this
-    process, and so does any span naming an agent you did not list. Leave it out
-    and every span this process records is sent, which is what a process with no
-    other OpenTelemetry setup usually wants. Use it when ``init()`` attaches to a
-    provider you already own, because then every span your application produces
-    reaches us. An agent whose work crosses two processes needs ``agents`` in each
-    one, and the second process keeps the work arriving from the first when the
-    span looks like model work.
+    process, and so does any span naming an agent you did not list. If you set
+    none of ``agents``, ``require_span_attributes``, and
+    ``reject_span_attributes``, every span this process records is sent, which
+    is what a process with no other OpenTelemetry setup usually wants. Use
+    ``agents`` when ``init()`` attaches to a provider you
+    already own, because then every span your application produces reaches us.
+    An agent whose work crosses two processes needs ``agents`` in each one, and
+    the second process keeps the work arriving from the first when the span
+    looks like model work.
+
+    ``require_span_attributes`` maps attribute names to the values a span must
+    hold to be sent, e.g.
+    ``require_span_attributes={"customer.id": ["acme", "globex"]}``.
+    ``reject_span_attributes`` maps attribute names to the values that
+    withhold a span, and it decides first: a span holding any rejected pair is
+    not sent, whatever ``require_span_attributes`` says. The filter reads each
+    key from the finished span. The stamped mark
+    ``convergent.attributes.<key>`` answers first, then the span's own bare
+    attribute, then the resource attribute. Mark one request with
+    ``span(..., context_attributes={...})``, which stamps the pairs onto
+    every span started inside the block and writes nothing to outbound
+    requests. Under ``require_span_attributes``, a span that holds the key in
+    no source is not sent; under ``reject_span_attributes`` alone, it is.
+    Values compare exactly, by type and case. Require keys combine with AND,
+    reject keys with OR, and a key's listed values with OR.
+    ``CONVERGENT_REQUIRE_SPAN_ATTRIBUTES`` and
+    ``CONVERGENT_REJECT_SPAN_ATTRIBUTES`` fill the two in from the
+    environment, JSON-encoded, when the arguments are absent. The filters and
+    ``agents`` combine: a span is sent only when every configured filter keeps
+    it. Configure them in each process; nothing about them travels between
+    services.
 
     ``api_key`` implies the Convergent destination. ``endpoint`` overrides the
     managed ingest endpoint for local or private receivers. The same address
     registers the deployment and receives spans. ``destinations`` adds places on
-    top of that, and every span goes to all of them:
+    top of that, and every span the filters keep goes to all of them:
 
         init(destinations=[convergent.File("/data/traces"), convergent.Console()])
 
@@ -219,13 +245,19 @@ def init(
             ``release`` that is not a string, ``debug`` or ``strict`` that is not
             a bool, ``tracer_provider`` that is not an
             ``opentelemetry.sdk.trace`` provider, ``agents`` that is not a list
-            of names, or a ``destinations`` entry that is not a ``File`` or a
-            ``Console``.
+            of names, ``require_span_attributes`` or ``reject_span_attributes``
+            that is not a mapping of attribute names to values, or a
+            ``destinations`` entry that is not a ``File`` or a ``Console``.
         ValueError: an argument or ``CONVERGENT_*`` variable has a value that
             cannot work -- nothing configured at all, no release, an endpoint
             that is not an http or https URL, an empty or oversized agent name,
-            more names than registration accepts, or an unreadable
-            ``CONVERGENT_DEBUG``, ``CONVERGENT_STRICT``, or
+            more names than registration accepts, an empty
+            ``require_span_attributes`` or ``reject_span_attributes`` mapping
+            or attribute name, a ``require_span_attributes`` or
+            ``reject_span_attributes`` value of ``None`` -- pass an empty list
+            to match nothing -- a ``CONVERGENT_REQUIRE_SPAN_ATTRIBUTES`` or
+            ``CONVERGENT_REJECT_SPAN_ATTRIBUTES`` that is not JSON, or an
+            unreadable ``CONVERGENT_DEBUG``, ``CONVERGENT_STRICT``, or
             ``CONVERGENT_TRACES_EXPORTER``.
         OSError: a ``File`` destination's file cannot be opened.
     """
@@ -238,6 +270,8 @@ def init(
             endpoint=endpoint,
             release=release,
             agents=agents,
+            require_span_attributes=require_span_attributes,
+            reject_span_attributes=reject_span_attributes,
             destinations=destinations,
             tracer_provider=tracer_provider,
             debug=debug,
@@ -251,6 +285,8 @@ def init(
             endpoint=endpoint,
             release=release,
             agents=agents,
+            require_span_attributes=require_span_attributes,
+            reject_span_attributes=reject_span_attributes,
             destinations=destinations,
             tracer_provider=tracer_provider,
             debug=debug,
@@ -316,7 +352,7 @@ def _commit_config(config: _Config) -> Status:
                     trace.set_tracer_provider(provider)
             except Exception:
                 return _fail_setup(config)
-            _processors.extend(processors)
+            _drain.extend(processors)
             _config = config
             _startup_failure = None
             _state = Snapshot(provider, config.release, deployment, owns_provider, linked)
@@ -406,6 +442,8 @@ def _repeat_init(
     endpoint: object,
     release: object,
     agents: object,
+    require_span_attributes: object,
+    reject_span_attributes: object,
     destinations: object,
     tracer_provider: object,
     debug: object,
@@ -425,6 +463,8 @@ def _repeat_init(
             endpoint=endpoint,
             release=release,
             agents=agents,
+            require_span_attributes=require_span_attributes,
+            reject_span_attributes=reject_span_attributes,
             destinations=destinations,
             tracer_provider=tracer_provider,
             debug=debug,
@@ -624,7 +664,7 @@ def _attach_processors(
     deployment: Mapping[str, str],
     built: Sequence[SpanProcessor],
 ) -> list[SpanProcessor]:
-    """Give ``provider`` its semantic processor, the built destinations, and the network.
+    """Give ``provider`` the semantic processor, the context stamper, and the filtered destinations.
 
     Semantic first, exporters second, so a span carries its identity before
     anything ships it. ``deployment`` goes to the semantic processor because an
@@ -656,13 +696,8 @@ def _attach_processors(
         return []
 
     semantic = SemanticSpanProcessor(config.release, deployment)
-    # One filter, so one table of kept span ids serves every span in the process.
-    destinations: list[SpanProcessor] = (
-        [_egress.DeclaredAgentFilter(config.agents, exporters)]
-        if config.agents is not None
-        else exporters
-    )
-    for processor in [semantic, *destinations]:
+    wrapped = _processors.wrap(config.policy, config.agents, exporters)
+    for processor in [semantic, _processors._STAMPER, *wrapped]:
         provider.add_span_processor(processor)
     return [semantic, *exporters]
 
@@ -698,7 +733,7 @@ def flush(timeout_ms: int = 5_000) -> FlushResult:
     """
     started = _monotonic()
     with _lock:
-        processors = tuple(_processors)
+        processors = tuple(_drain)
         triggers = tuple(_registration_triggers.values())
     for trigger in triggers:
         trigger()
@@ -827,7 +862,7 @@ def _adopt(
     with _lock:
         if _config is not None:
             return _config
-        _processors.extend(exporters)
+        _drain.extend(exporters)
         _config = config
         _startup_failure = None
         _provider_source = provider_source
@@ -850,7 +885,7 @@ def _abandon(config: _Config, exporters: Sequence[SpanProcessor]) -> None:
     processor. If that call raises, the provider never carried it, so the claim
     is rolled back and the exporter is removed from the drain list.
     """
-    global _config, _provider_source, _state, _processors, _registration_triggers
+    global _config, _provider_source, _state, _drain, _registration_triggers
     with _lock:
         if _config == config:
             _config = None
@@ -859,7 +894,7 @@ def _abandon(config: _Config, exporters: Sequence[SpanProcessor]) -> None:
             _state = Snapshot()
         for processor in exporters:
             try:
-                _processors.remove(processor)
+                _drain.remove(processor)
             except ValueError:
                 pass
 
@@ -958,21 +993,22 @@ def _sdk_version() -> str:
     return "0.0.0"
 
 
-def _warn_once(key: str, message: str) -> None:
+def _warn_once(key: str, message: str, *, level: int = logging.WARNING) -> None:
     with _lock:
         if key in _warned:
             return
         _warned.add(key)
-    logger.warning(message)
+    logger.log(level, message)
 
 
 def _dropped_settings(config: _Config | None, running: _Config) -> str:
     """Name what a losing configuration asked for and did not get.
 
-    A discarded ``agents`` setting is a discarded privacy control, so it is
-    named rather than left for the reader to work out from ``Status``. Shared
-    by both losing paths: a second ``init()`` and a ``ConvergentSpanProcessor``
-    that lost the claim.
+    A discarded ``agents``, ``require_span_attributes``, or
+    ``reject_span_attributes`` setting is a discarded privacy control, so each
+    is named rather than left for the reader to work out from ``Status``.
+    Shared by both losing paths: a second ``init()`` and a
+    ``ConvergentSpanProcessor`` that lost the claim.
 
     ``None`` is a call whose own arguments could not be read as a configuration at
     all, which names nothing.
@@ -982,6 +1018,8 @@ def _dropped_settings(config: _Config | None, running: _Config) -> str:
     lost: list[str] = []
     if config.agents is not None and config.agents != running.agents:
         lost.append("the agents it declared")
+    if config.policy is not None and config.policy != running.policy:
+        lost.append("the attributes it required or rejected")
     if (config.api_key, config.endpoint) != (running.api_key, running.endpoint):
         lost.append("a different api key or endpoint")
     return f" It dropped {' and '.join(lost)}." if lost else ""
@@ -1089,7 +1127,7 @@ def _drain_all_processors() -> None:
     # and a per-processor timeout would let a hung receiver hold exit for 5s per
     # destination.
     deadline = time.monotonic() + _DRAIN_BUDGET_S
-    for processor in list(_processors):
+    for processor in list(_drain):
         remaining_ms = max(0, int((deadline - time.monotonic()) * 1_000))
         try:
             processor.force_flush(remaining_ms)
@@ -1122,7 +1160,7 @@ def _span_limits() -> SpanLimits:
 def _reset_for_tests() -> None:
     global _config, _dropped, _provider_source, _startup_failure, _state, _registration_triggers
     with _lock:
-        _shut_down(_processors)
+        _shut_down(_drain)
         _transport.dropped_spans()
         _transport.lost_spans()
         _state = Snapshot()
@@ -1130,7 +1168,7 @@ def _reset_for_tests() -> None:
         _startup_failure = None
         _dropped = None
         _provider_source = None
-        _processors.clear()
+        _drain.clear()
         _registration_triggers.clear()
         _warned.clear()
         _semantic._reported.clear()

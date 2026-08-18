@@ -130,7 +130,8 @@ trace keeps the same shape.
 
 [Instrument](instrument.md) covers confirming a run arrived with `check()` and
 instrumenting your agent by hand. [OpenTelemetry](opentelemetry.md) covers
-attaching to an existing OpenTelemetry setup, and [Integrations](integrations/index.md)
+attaching to an existing OpenTelemetry setup and the `agents`, `require_span_attributes`, and
+`reject_span_attributes` filters, and [Integrations](integrations/index.md)
 the integration packages. The reference section holds
 [configuration](configuration.md), the [API reference](reference/api.md), the
 [attribute spellings Convergent reads](reference/attributes.md), and

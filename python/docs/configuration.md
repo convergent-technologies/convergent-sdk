@@ -5,13 +5,14 @@ description: What the SDK reads from the environment, and how it behaves at runt
 
 ## What gets installed
 
-`pip install convergent-sdk` brings fifteen packages: the SDK, the three
-OpenTelemetry packages it declares, and their dependencies. The install line sets a floor and no ceiling on the OpenTelemetry
-packages, so current releases work. The SDK works with OpenTelemetry 1.25.0 and
-newer, and 1.41.0 or later is recommended. Below 1.41.0 everything traces
-normally, but `FlushResult.dropped` cannot count the spans a full queue threw
-away, so it reads 0. The count comes from an argument `BatchSpanProcessor` gained
-in 1.41.0, and older releases get a processor without it.
+`pip install convergent-sdk` brings the SDK, the OpenTelemetry packages it
+declares, and their dependencies. The install line sets a floor and no ceiling
+on the OpenTelemetry packages, so current releases work. The SDK works with
+OpenTelemetry 1.25.0 and newer, and 1.41.0 or later is recommended. Below
+1.41.0 everything traces normally, but `FlushResult.dropped` cannot count the
+spans a full queue threw away, so it reads 0. The count comes from an argument
+`BatchSpanProcessor` gained in 1.41.0, and older releases get a processor
+without it.
 
 ```
 convergent-sdk
@@ -34,7 +35,9 @@ OTLP/HTTP.
 | `CONVERGENT_API_KEY`         | the ingestion key. Implies the Convergent destination         |
 | `CONVERGENT_ENDPOINT`        | receiver address. Defaults to `https://ingest.convergent.dev` |
 | `CONVERGENT_RELEASE`         | the release, when `init(release=...)` is not passed. One of the two is required. |
-| `CONVERGENT_SPANS_DIR`       | write every span to `spans.jsonl` in this directory           |
+| `CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` | the `require_span_attributes` filter, as JSON, when the argument is not passed |
+| `CONVERGENT_REJECT_SPAN_ATTRIBUTES` | the `reject_span_attributes` filter, as JSON, when the argument is not passed |
+| `CONVERGENT_SPANS_DIR`       | write the spans the filters keep to `spans.jsonl` in this directory |
 | `CONVERGENT_TRACES_EXPORTER` | `console` adds a console destination to the others            |
 | `CONVERGENT_DEBUG`           | `1` gives the `convergent.sdk` logger a level of its own      |
 | `CONVERGENT_STRICT`          | `1` makes a configuration that cannot work raise and stop the process at startup, instead of the default log-and-disable |
@@ -43,10 +46,15 @@ Each of `CONVERGENT_API_KEY`, `CONVERGENT_ENDPOINT`, and `CONVERGENT_RELEASE`
 is the fallback for an `init()` argument of the same name, and the argument
 wins.
 
+`CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` and `CONVERGENT_REJECT_SPAN_ATTRIBUTES`
+fill `require_span_attributes` and `reject_span_attributes` the same way. Each
+holds the mapping as JSON, e.g. `'{"customer.id": ["acme"]}'`. A value that is
+not JSON is rejected the way a malformed argument is.
+
 `CONVERGENT_SPANS_DIR` is read by `init()` only; `otel.install()` takes no
 destinations. The variable adds a file destination beside any `destinations`
-argument rather than replacing it, so a process that sets both writes every span
-to two files and one warning says so.
+argument rather than replacing it, so a process that sets both writes the spans the
+filters keep to two files and one warning says so.
 
 `CONVERGENT_TRACES_EXPORTER=console` adds a destination rather than replacing
 the others, so you can read what you are sending while still sending it.
@@ -85,6 +93,18 @@ and a variable that is not set is never a problem. These are the conditions:
 - `agents` is not a list of names, such as `agents="support-agent"`. `TypeError`.
 - `agents` holds an empty name, more than 256 names, or a name over 512
   characters. `ValueError` naming the cap.
+- `require_span_attributes` or `reject_span_attributes` is not a mapping of attribute names to values, such as
+  `require_span_attributes="customer.id"`, or an attribute name in it is not a string.
+  `TypeError`.
+- `require_span_attributes` or `reject_span_attributes` is an empty mapping, or an attribute name in it is
+  empty or padded with spaces. `ValueError`.
+- A `require_span_attributes` or `reject_span_attributes` value is not a plain string, number, or bool. A
+  nested list, a mapping, bytes, and a subclass such as an enum member are
+  each a `TypeError` naming the fix.
+- A `require_span_attributes` or `reject_span_attributes` value is `None`. `ValueError` saying to pass an
+  empty list to match nothing.
+- `CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` or `CONVERGENT_REJECT_SPAN_ATTRIBUTES`
+  holds a value that is not JSON. `ValueError` naming the variable.
 - `destinations` holds anything other than a `File` or a `Console`. `TypeError`.
 - A `File` destination's spans file cannot be opened, because the directory
   cannot be created or the file cannot be written. `OSError`.
@@ -107,17 +127,17 @@ No provider is installed and no deployment is registered, so a corrected
 ## Destinations
 
 `api_key` sends to Convergent. `destinations` adds places on top, and every span
-goes to all of them.
+the `agents`, `require_span_attributes`, and `reject_span_attributes` filters keep goes to all of them.
 
 ```python
 convergent.init(release="1.4.0", destinations=[convergent.File("/data/traces"), convergent.Console()])
 ```
 
-A `File` destination writes every span to disk instead of the network, and it
-needs no credentials. Use it where the process cannot reach the receiver, for
-example a locked-down container or a CI job. Two `File` values naming one file
-collapse into one destination; two different files do not, and one warning says
-every span is being written twice.
+A `File` destination writes the spans the filters keep to disk instead of the
+network, and it needs no credentials. Use it where the process cannot reach
+the receiver, for example a locked-down container or a CI job. Two `File`
+values naming one file collapse into one destination; two different files do
+not, and one warning says every span is being written twice.
 
 `File` and `Console` are the two destinations. Anything else in `destinations`,
 such as a raw OpenTelemetry `SpanProcessor`, is rejected. To add a processor of
@@ -127,8 +147,8 @@ and let it route, which is usually less work than writing an exporter.
 
 ## What gets sent
 
-Whatever your spans carry is what leaves your process. Convergent does not scrub
-or transform your content, so a prompt on a span reaches the receiver.
+Whatever the filters keep is what leaves your process. Convergent does not scrub
+or transform your content, so a prompt on a kept span reaches the receiver.
 
 An exception's message and traceback are the one thing the SDK does not record. A
 span records the exception's class name and nothing else, so
@@ -141,7 +161,9 @@ switch for each package.
 
 There is no redaction mode. Matching secret-shaped key names matches names rather
 than values, so `{"note": "the password is hunter2"}` would go straight through.
-To decide what may leave your process by value, put an
+To decide which spans leave your process by value, set `init(require_span_attributes=...)` or
+`init(reject_span_attributes=...)`.
+To transform or redact the content of the spans you do send, put an
 [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/configuration/)
 between your process and the receiver. A Collector matches values as well as
 names, it runs outside your application so a change is configuration rather than
