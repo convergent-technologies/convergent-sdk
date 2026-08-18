@@ -1,5 +1,5 @@
 ---
-title: API
+title: API reference
 description: Every call in the public surface.
 ---
 
@@ -13,15 +13,19 @@ There are no Convergent exception types. A value of the wrong type raises
 `TypeError`, a value of the right type that is not allowed raises `ValueError`, and
 a spans file that cannot be opened raises `OSError`.
 
-Each returned type is documented as a field table. A dash in the allowed values
+Each callable is documented in one order: the signature, the return value,
+then the arguments with the type and whether the argument is required. Each
+returned type is documented as a field table. A dash in the allowed values
 column means the type is the only constraint on the value.
 
-## __version__
+## Setup
+
+### __version__
 
 The installed package's version string, `"0.0.0"` in a source checkout with no
 `convergent-sdk` distribution installed.
 
-## init()
+### init()
 
 ```python
 convergent.init(*, api_key=None, endpoint=None, release=None, agents=None,
@@ -30,45 +34,82 @@ convergent.init(*, api_key=None, endpoint=None, release=None, agents=None,
                 debug=False, strict=False) -> Status
 ```
 
-Configures tracing for the process and returns what was configured. Call it once
-at startup.
+Configures tracing for the process. Call it once at startup.
 
-| Argument | Environment variable | Default |
-| --- | --- | --- |
-| `api_key` | `CONVERGENT_API_KEY` | none |
-| `endpoint` | `CONVERGENT_ENDPOINT` | `https://ingest.convergent.dev` |
-| `release` | `CONVERGENT_RELEASE` | none |
-| `agents` | | send every span |
-| `require_span_attributes` | `CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` | send every span |
-| `reject_span_attributes` | `CONVERGENT_REJECT_SPAN_ATTRIBUTES` | send every span |
-| `destinations` | `CONVERGENT_SPANS_DIR` | none |
-| `tracer_provider` | | the global provider |
-| `debug` | `CONVERGENT_DEBUG` | `False` |
-| `strict` | `CONVERGENT_STRICT` | `False` |
+**Returns:** a [Status](#status) stating what was configured.
 
-`api_key` implies the Convergent destination. Without an API key and without a
-file destination, the configuration is rejected. A release is required too. Any
-string naming the version works: a git sha, a build id, a date.
+**Arguments:** every argument is keyword-only. Most fall back to an
+[environment variable](#environment-variables) when they are not passed.
 
-`agents` is the list of agent names Convergent is allowed to see. Name them and
-we get those agents' spans and everything inside their runs. If you set none of
-`agents`, `require_span_attributes`, and `reject_span_attributes`, every span
-the process records is sent.
+- **`api_key`** (`str`, optional): implies the Convergent destination. Without
+  an API key and without a file destination, the configuration is rejected.
+- **`endpoint`** (`str`, optional; default: `https://ingest.convergent.dev`):
+  the receiver to send spans to, such as a customer-hosted data plane or a
+  collector running beside your process.
+- **`release`** (`str`, optional): a working configuration requires one, from
+  the argument or its variable. Any string naming the version works: a git
+  sha, a build id, a date.
+- **`agents`** (`list[str]`, optional; default: send every span): the list of
+  agent names Convergent is allowed to see. Name them and we get those agents'
+  spans and everything inside their runs. Any iterable of names works, and a
+  repeated name is dropped.
+- **`require_span_attributes`** (`Mapping[str, object]`, optional; default:
+  send every span): sends a span only when it matches every key/value in the
+  mapping, an AND across all of them.
+  `require_span_attributes={"customer.id": "acme"}` sends only spans marked
+  for that customer. A key also takes a list of values, and any one of them
+  matches. [Span filters](#span-filters) states the rules.
+- **`reject_span_attributes`** (`Mapping[str, object]`, optional; default:
+  send every span): withholds a span when it matches any key/value in the
+  mapping, an OR across all of them.
+  `reject_span_attributes={"customer.id": "internal-test"}` withholds the
+  spans marked that way and sends the rest. A key also takes a list of values.
+  [Span filters](#span-filters) states the rules.
+- **`destinations`** (`Sequence[Destination]`, optional): extra
+  [destinations](#destinations) spans go to, in addition to the Convergent
+  ingestion endpoint. Every span the filters keep goes to all of them.
+- **`tracer_provider`** (`TracerProvider`, optional; default: the global
+  provider): the provider to attach to instead of looking one up. Its Resource
+  is left alone and the global provider is not set.
+- **`debug`** (`bool`, optional; default: `False`): gives the
+  `convergent.sdk` logger a level of its own.
+- **`strict`** (`bool`, optional; default: `False`): makes a configuration
+  that cannot work raise at startup, instead of the default log-and-disable.
+
+If you set none of `agents`, `require_span_attributes`, and
+`reject_span_attributes`, every span the process records is sent.
+
+```python
+convergent.init(release="1.4.0", destinations=[convergent.File("/data/traces"), convergent.Console()])
+```
+
+A second `init()` with different settings keeps the first configuration and
+returns a `Status` with `reason="already_configured"`.
+
+For `agents`, a value that is not names at all is a `TypeError`. An empty name,
+more than 256 names, and a name over 512 characters are each a `ValueError`,
+which are the shapes and caps registration accepts.
+[Strict startup](../configuration.md#strict-startup) lists every condition a
+configuration can be rejected on.
+
+`init()` blocks the calling thread while it registers the deployment, and that call
+retries within a budget of about five seconds, so it does not belong in a request
+path. With a file as the only destination it registers nothing and returns right
+away.
+
+#### Span filters
 
 `require_span_attributes` and `reject_span_attributes` filter by attribute
 value:
 
-- `require_span_attributes={"customer.id": ["acme", "globex"]}` sends a span
-  only when every named key holds an allowed value.
-- `reject_span_attributes={"customer.id": ["internal-test"]}` withholds a span
-  when any named key holds a listed value.
 - A key takes one value or a list. Listed values combine with OR.
 - `require_span_attributes` keys combine with AND.
   `reject_span_attributes` keys combine with OR.
 - Reject decides first. A pair named in both mappings is withheld, and
   `init()` logs an ERROR for it at startup.
-- Each environment variable holds the same mapping as JSON, e.g.
-  `'{"customer.id": ["acme"]}'`, and fills the argument in when it is absent.
+- The [environment variables](#environment-variables) hold the same mappings
+  as JSON, e.g. `'{"customer.id": "acme"}'`, and fill the arguments in when
+  they are absent.
 
 Three ways hold a key:
 
@@ -80,12 +121,17 @@ Three ways hold a key:
 3. Resource attributes, `OTEL_RESOURCE_ATTRIBUTES` included, once per process.
 
 The stamped mark answers first, then the span's own attribute, then the
-resource. Your own exporters receive the stamp.
+resource. Your own exporters receive the stamp and every span: the filters
+govern only the destinations the SDK set up.
 
 The matching rules:
 
 - Comparison is exact, by type and case. `1` matches neither `"1"` nor
   `True`. `"Acme"` does not match `"acme"`.
+- The filter decides each span alone; a kept parent does not keep its
+  children. To keep or exclude a whole run, hold the key with
+  `context_attributes=`. A bare attribute on the run span covers that one
+  span only.
 - An unmarked span never passes `require_span_attributes`. Under
   `reject_span_attributes` alone, an unmarked span is sent.
 - A list-valued or enum-valued span attribute never matches.
@@ -102,31 +148,33 @@ The matching rules:
   service. Nothing about them travels between processes. A service with no
   filters sends everything it records.
 
-`destinations` adds places on top of Convergent, and every span the filters
-keep goes to all of them.
+### Status
 
-```python
-convergent.init(release="1.4.0", destinations=[convergent.File("/data/traces"), convergent.Console()])
-```
+Returned by `init()`.
 
-`tracer_provider` is the provider to attach to instead of looking one up. Its
-Resource is left alone and the global provider is not set.
+| Field | Type | Allowed values | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | `bool` | `True`, `False` | tracing is on |
+| `deployment` | `str \| None` | — | the registered deployment id |
+| `release` | `str \| None` | — | the release this process reported |
+| `agents` | `list[str]` | — | the names the server confirmed it linked |
+| `destinations` | `list[str]` | — | e.g. `["convergent", "file:/data/traces/spans.jsonl"]` |
+| `mode` | `str` | `"owned"`, `"attached"` | whether `init()` created the tracer provider or attached to yours |
+| `app_url` | `str \| None` | — | where this deployment is in the workspace. `None` today, because nothing fills it in yet |
+| `reason` | `str \| None` | `None`, `"missing_config"`, `"invalid_config"`, `"setup_failed"`, `"no_provider"`, `"already_configured"` | `None`, or why part of the setup is not working |
+| `require_span_attributes` | `Mapping \| None` | — | the running require filter, as attribute name to value list. `None` when not configured |
+| `reject_span_attributes` | `Mapping \| None` | — | the running reject filter, same shape. `None` when not configured |
 
-A second `init()` with different settings keeps the first configuration and
-returns a `Status` with `reason="already_configured"`.
+The two filter fields echo what validation kept after a keyword argument beat
+its environment variable, so they state what this process filters on. The
+printed `check()` report shows them as one `filters` row, reject first.
 
-Any iterable of names works for `agents`, and a repeated name is dropped. A value
-that is not names at all is a `TypeError`. An empty name, more than 256 names, and
-a name over 512 characters are each a `ValueError`, which are the shapes and caps
-registration accepts. [Strict startup](../configuration.md#strict-startup) lists every
-condition a configuration can be rejected on.
+`agents` reports registration with the server. The filter described in
+[Filtering what is sent](../opentelemetry.md#filtering-what-is-sent) enforces
+the list this process declared, so a name the server declined still has its
+spans sent.
 
-`init()` blocks the calling thread while it registers the deployment, and that call
-retries within a budget of about five seconds, so it does not belong in a request
-path. With a file as the only destination it registers nothing and returns right
-away.
-
-## check()
+### check()
 
 ```python
 convergent.check() -> Report
@@ -136,6 +184,8 @@ Reads what `init()` configured, then asks the server what it can see for the
 same key and release. A network failure, a rejected key, and an unparseable
 response all come back as a report saying so. Print it.
 
+**Returns:** a [Report](#report). Takes no arguments.
+
 `bool(report)` is true when tracing is on, no part of the SDK is known to be
 broken, and the server answered for this key. A correct file only setup is
 false, because there is no key to answer with. To gate CI on a file only setup,
@@ -144,7 +194,11 @@ check `Status.enabled` and then check that the spans file has content.
 Do not poll `check()` from a health check on a short interval. Frequent calls can
 slow deployment registration.
 
-### Report
+The server links an agent to a release when its first spans finish ingesting,
+so a check immediately after a flush can list no agent. Wait and check again
+before you read that as a failure.
+
+#### Report
 
 | Field | Type | Allowed values | Meaning |
 | --- | --- | --- | --- |
@@ -157,7 +211,7 @@ slow deployment registration.
 | `agents_truncated` | `bool` | `True`, `False` | `True` when the server had more than it would list |
 | `notes` | `list[Note]` | — | a `Note` for each problem the server can see |
 
-### Note
+#### Note
 
 | Field | Type | Allowed values | Meaning |
 | --- | --- | --- | --- |
@@ -169,7 +223,9 @@ SDK shipped still reaches the reader through `message`. Today the server sends a
 note when no deployment is registered for the release, and when a deployment is
 registered but no agent has ever been linked to it.
 
-## observe()
+## Tracing
+
+### observe()
 
 ```python
 convergent.observe(*, name, operation, attributes=None, context_attributes=None) -> Callable
@@ -178,24 +234,33 @@ convergent.observe(*, name, operation, attributes=None, context_attributes=None)
 Records each call of the decorated function as one span. Works on plain
 functions, coroutines, generators, and async generators.
 
-`attributes` land on that one span. `context_attributes` land on that span and
-on every span started while the call runs. [span()](#span) states the full
-rules for both.
+**Returns:** the decorator to apply. The decorator yields nothing, so
+[current_span()](#current_span) is how the decorated function records its own
+input and output.
+
+**Arguments:** every argument is keyword-only.
+
+- **`name`** (`str`, required): the span's name, 1 to 128 characters. For
+  `agent_run`, it is the agent's identity. Keep it stable, like a class name,
+  and put the varying part in `attributes`.
+- **`operation`** (`str`, required): what the span records.
+  [Operations](#operations) lists the recognized values, and any other string
+  is recorded exactly as you wrote it.
+- **`attributes`** (`Mapping[str, str | bool | int | float]`, optional):
+  attributes for that one span.
+- **`context_attributes`** (`Mapping[str, str | bool | int | float]`,
+  optional): pairs set in the OpenTelemetry context while the call runs. They
+  land on that span and on every span started during the call.
+  [span()](#span) states the full rules for both parameters.
 
 A generator's span covers the whole iteration, and abandoning one early is not
 recorded as an error. A traced generator nobody exhausted still has its span open
 when the process ends, so it was never queued and the exit flush cannot save it.
 
-For `agent_run`, `name` is the agent's identity. Keep it stable, like a class
-name. Put the varying part in `attributes`.
-
 A name outside 1 to 128 characters, or an unrecognized operation, is logged once
 and the span is still recorded. Validation happens at ingest.
 
-The decorator yields nothing, so [current_span()](#current_span) is how the
-decorated function records its own input and output.
-
-## agent()
+### agent()
 
 ```python
 convergent.agent(*, name, attributes=None, context_attributes=None) -> Callable
@@ -209,44 +274,73 @@ Everything `observe()` says holds here.
 def handle(ticket): ...
 ```
 
-`name` is required and keyword-only on purpose. It is the agent's identity in
-your workspace, so deriving it from the function name would let a rename in the
-code rename the agent.
+**Returns:** the decorator to apply.
 
-## tool()
+**Arguments:** every argument is keyword-only.
+
+- **`name`** (`str`, required): the agent's identity in your workspace.
+  Required on purpose: deriving it from the function name would let a rename
+  in the code rename the agent.
+- **`attributes`**, **`context_attributes`**
+  (`Mapping[str, str | bool | int | float]`, optional): as on
+  [observe()](#observe).
+
+### tool()
 
 ```python
 convergent.tool(*, name=None, attributes=None, context_attributes=None) -> Callable
 ```
 
-`observe(operation="tool_call")`, spelled for the common case. Leave `name` out
-and the decorated function's `__name__` is the tool's name.
+`observe(operation="tool_call")`, spelled for the common case.
 
 ```python
 @convergent.tool()
 def lookup_invoice(invoice_id): ...
 ```
 
+**Returns:** the decorator to apply.
+
+**Arguments:** every argument is keyword-only.
+
+- **`name`** (`str`, optional; default: the decorated function's `__name__`):
+  the tool's name.
+- **`attributes`**, **`context_attributes`**
+  (`Mapping[str, str | bool | int | float]`, optional): as on
+  [observe()](#observe).
+
 Write it as `@convergent.tool()` or `@convergent.tool(name="lookup_invoice")`.
 The bare `@convergent.tool` form is not supported.
 
-## span()
+### span()
 
 ```python
 convergent.span(*, name, operation, attributes=None, context_attributes=None) -> Iterator
 ```
 
-Records one span for the body of a `with` block and yields a
-[SpanHandle](#spanhandle).
+Records one span for the body of a `with` block.
 
 ```python
 with convergent.span(name="answer", operation="model_call") as handle:
     handle.set_input(prompt)
 ```
 
-`attributes` land on that one span. `context_attributes` land on that span and
-on every span started inside the block, library spans included. The pairs live
-in the OpenTelemetry context for exactly the block's lifetime. The SDK stamps
+**Returns:** a context manager that yields a [SpanHandle](#spanhandle).
+
+**Arguments:** every argument is keyword-only.
+
+- **`name`** (`str`, required): the span's name, 1 to 128 characters.
+- **`operation`** (`str`, required): what the span records.
+  [Operations](#operations) lists the recognized values, and any other string
+  is recorded exactly as you wrote it.
+- **`attributes`** (`Mapping[str, str | bool | int | float]`, optional):
+  attributes for that one span.
+- **`context_attributes`** (`Mapping[str, str | bool | int | float]`,
+  optional): pairs set in the OpenTelemetry context for the block's lifetime.
+  They land on that span and on every span started inside the block, library
+  spans included.
+
+The `context_attributes` pairs live in the OpenTelemetry context for exactly
+the block's lifetime. The SDK stamps
 each pair onto every span at start as `convergent.attributes.<key>`, so a
 stamp overwrites no attribute. Nested blocks merge their pairs, and the inner
 value wins for a key both set. When one call names a key in both parameters,
@@ -254,7 +348,7 @@ the span carries both: the bare key from `attributes` and the stamped key from
 `context_attributes`, and the filter reads the stamped key first. The pairs
 stay in the process: nothing writes them to outbound requests. This is how a
 request is marked for the
-[`require_span_attributes=` and `reject_span_attributes=` filters](#init).
+[`require_span_attributes=` and `reject_span_attributes=` filters](#span-filters).
 
 The pairs follow an `asyncio` task. A raw thread starts with an empty context,
 so pass `contextvars.copy_context()` to reach a worker thread.
@@ -272,7 +366,7 @@ exception event is added, and neither the message nor the traceback leaves your
 process. When you want the message in the trace, put it on a key of your own with
 `set_attribute()` once you have decided it is safe to send.
 
-### Operations
+#### Operations
 
 | What you write | What the span says |
 | --- | --- |
@@ -314,7 +408,7 @@ one that reads or queries external data. The SDK writes `function`, because a
 callable in your process is all it can see, so pass your own value in `attributes`
 for the other two.
 
-### SpanHandle
+#### SpanHandle
 
 | Member | What it does |
 | --- | --- |
@@ -344,15 +438,16 @@ A value must be a string, bool, int, float, or a flat sequence of those.
 
 `set_tool_call_id()` takes 1 to 256 characters.
 
-## current_span()
+### current_span()
 
 ```python
 convergent.current_span() -> SpanHandle
 ```
 
-A handle on the innermost active span, whatever created it. This is how a
-function decorated with `observe()`, `agent()`, or `tool()` records content,
-since the decorator yields no handle.
+**Returns:** a [SpanHandle](#spanhandle) on the innermost active span,
+whatever created it. Takes no arguments. This is how a function decorated with
+`observe()`, `agent()`, or `tool()` records content, since the decorator
+yields no handle.
 
 ```python
 @convergent.tool()
@@ -365,15 +460,16 @@ unconfigured, the handle's methods do nothing. The span may be a framework's
 rather than one this SDK opened, and in a callback or a spawned task it may not
 be the span you expect.
 
-## current_trace()
+### current_trace()
 
 ```python
 convergent.current_trace() -> TraceRef | None
 ```
 
-Where the active span sits, or `None` when there is none.
+**Returns:** a [TraceRef](#traceref) stating where the active span sits, or
+`None` when there is none. Takes no arguments.
 
-### TraceRef
+#### TraceRef
 
 | Field | Type | Allowed values | Meaning |
 | --- | --- | --- | --- |
@@ -381,7 +477,7 @@ Where the active span sits, or `None` when there is none.
 | `span_id` | `str` | — | the active span, as a hex string |
 | `permalink` | `str \| None` | — | `None` today, because no route displays a single trace |
 
-## flush()
+### flush()
 
 ```python
 convergent.flush(timeout_ms=5000) -> FlushResult
@@ -390,7 +486,14 @@ convergent.flush(timeout_ms=5000) -> FlushResult
 Drains buffered spans now. Call it in any process that might be killed rather
 than exit normally, e.g. a Lambda between invocations.
 
-### FlushResult
+**Returns:** a [FlushResult](#flushresult).
+
+**Arguments:**
+
+- **`timeout_ms`** (`int`, optional; default: `5000`): the deadline `flush()`
+  measures against and passes on to each destination.
+
+#### FlushResult
 
 | Field | Type | Allowed values | Meaning |
 | --- | --- | --- | --- |
@@ -410,24 +513,13 @@ and so does a destination that cannot write. The count is taken and reset on eac
 call, so when two threads flush at the same moment one of them sees a given loss
 and the other does not.
 
-`timeout_ms` is the deadline `flush()` measures against and passes on to each
-destination. A destination sends everything already queued before it returns, so
-a long queue or a slow receiver carries the call past that deadline, and
-`elapsed_ms` reports how long it really took. Each export request is bounded by
+A destination sends everything already queued before it returns, so
+a long queue or a slow receiver carries the call past the `timeout_ms`
+deadline, and `elapsed_ms` reports how long it really took. Each export request is bounded by
 `OTEL_EXPORTER_OTLP_TIMEOUT`, which defaults to ten seconds, so lower that
 variable when you need a tighter ceiling. It bounds the network exporter only. A
 file or console drain depends on the disk or stream underneath it and has no
 deadline the SDK enforces.
-
-## tracer_provider()
-
-```python
-convergent.tracer_provider() -> TracerProvider
-```
-
-The provider this process is configured with, for using OpenTelemetry directly.
-Never returns `None`. With tracing off you get a provider that records nothing,
-so your code needs no check around it. Call `init()` first.
 
 ## Destinations
 
@@ -504,33 +596,20 @@ def configure(destinations: list[convergent.Destination]) -> None: ...
 
 `File | Console`, for annotating a list of your own.
 
-## Status
+## OpenTelemetry
 
-Returned by `init()`.
+### tracer_provider()
 
-| Field | Type | Allowed values | Meaning |
-| --- | --- | --- | --- |
-| `enabled` | `bool` | `True`, `False` | tracing is on |
-| `deployment` | `str \| None` | — | the registered deployment id |
-| `release` | `str \| None` | — | the release this process reported |
-| `agents` | `list[str]` | — | the names the server confirmed it linked |
-| `destinations` | `list[str]` | — | e.g. `["convergent", "file:/data/traces/spans.jsonl"]` |
-| `mode` | `str` | `"owned"`, `"attached"` | whether `init()` created the tracer provider or attached to yours |
-| `app_url` | `str \| None` | — | where this deployment is in the workspace. `None` today, because nothing fills it in yet |
-| `reason` | `str \| None` | `None`, `"missing_config"`, `"invalid_config"`, `"setup_failed"`, `"no_provider"`, `"already_configured"` | `None`, or why part of the setup is not working |
-| `require_span_attributes` | `Mapping \| None` | — | the running require filter, as attribute name to value list. `None` when not configured |
-| `reject_span_attributes` | `Mapping \| None` | — | the running reject filter, same shape. `None` when not configured |
+```python
+convergent.tracer_provider() -> TracerProvider
+```
 
-The two filter fields echo what validation kept after a keyword argument beat
-its environment variable, so they state what this process filters on. The
-printed `check()` report shows them as one `filters` row, reject first.
+**Returns:** the `TracerProvider` this process is configured with, for using
+OpenTelemetry directly. Never returns `None`. Takes no arguments. With tracing
+off you get a provider that records nothing, so your code needs no check
+around it. Call `init()` first.
 
-`agents` reports registration with the server. The filter described in
-[Filtering what is sent](../opentelemetry.md#filtering-what-is-sent) enforces
-the list this process declared, so a name the server declined still has its
-spans sent.
-
-## otel.install()
+### otel.install()
 
 ```python
 convergent.otel.install(provider, *, api_key=None, endpoint=None, release=None,
@@ -538,16 +617,32 @@ convergent.otel.install(provider, *, api_key=None, endpoint=None, release=None,
                         strict=False) -> ConvergentSpanProcessor
 ```
 
-Adds Convergent to a provider you built, with no `init()` call. Handing the
-provider over is what makes `span()` and `observe()` record through it.
+Adds Convergent to a provider you built, with no `init()` call.
 
-`api_key`, `endpoint`, `release`, `require_span_attributes`,
-`reject_span_attributes`, and `strict` fall back to the same environment
-variables `init()` reads; `agents` has none.
+**Returns:** the [ConvergentSpanProcessor](#otelconvergentspanprocessor) it
+added to the provider.
+
+**Arguments:** every argument after `provider` is keyword-only and means what
+it means on [init()](#init), with the same
+[environment variable](#environment-variables) fallbacks.
 `destinations` is not accepted, so this route needs an API key.
 `CONVERGENT_SPANS_DIR` is read by `init()` only.
 
-## otel.ConvergentSpanProcessor
+- **`provider`** (`TracerProvider`, required): the provider to add Convergent
+  to. Handing the provider over is what makes `span()` and `observe()` record
+  through it.
+- **`api_key`** (`str`, optional)
+- **`endpoint`** (`str`, optional; default: `https://ingest.convergent.dev`)
+- **`release`** (`str`, optional)
+- **`agents`** (`list[str]`, optional; default: send every span): no
+  environment variable fills it in.
+- **`require_span_attributes`** (`Mapping[str, object]`, optional; default:
+  send every span): [Span filters](#span-filters) states the rules.
+- **`reject_span_attributes`** (`Mapping[str, object]`, optional; default:
+  send every span): [Span filters](#span-filters) states the rules.
+- **`strict`** (`bool`, optional; default: `False`)
+
+### otel.ConvergentSpanProcessor
 
 ```python
 provider.add_span_processor(
@@ -555,10 +650,40 @@ provider.add_span_processor(
 )
 ```
 
-The processor `install()` builds, for placing in your pipeline by hand. It takes
-`install()`'s arguments without `provider`, plus `tracer_provider`, which is the
-provider `span()` and `observe()` then record through.
+The processor `install()` builds, for placing in your pipeline by hand.
+
+**Arguments:** [otel.install()](#otelinstall)'s arguments without `provider`,
+every one keyword-only, plus:
+
+- **`tracer_provider`** (`TracerProvider`, optional; default: the global
+  provider): the provider `span()` and `observe()` then record through.
 
 Construction makes no network call, and no span ever waits for one. The first
 span starts deployment registration on a thread of its own. Every span carries
 your release, whether registration has landed yet or not.
+
+## Environment variables
+
+Each variable fills its argument in when the argument is not passed, and the
+argument wins. `CONVERGENT_DEBUG` is the exception: either it or `debug=True`
+turns debug logging on. [Configuration](../configuration.md) states the full
+rules and the values each variable accepts.
+
+- **`CONVERGENT_API_KEY`**: the ingestion key. Implies the Convergent
+  destination.
+- **`CONVERGENT_ENDPOINT`**: the receiver address. Defaults to
+  `https://ingest.convergent.dev`.
+- **`CONVERGENT_RELEASE`**: the release, when `init(release=...)` is not
+  passed. One of the two is required.
+- **`CONVERGENT_REQUIRE_SPAN_ATTRIBUTES`**: the `require_span_attributes`
+  filter, as JSON, e.g. `'{"customer.id": "acme"}'`.
+- **`CONVERGENT_REJECT_SPAN_ATTRIBUTES`**: the `reject_span_attributes`
+  filter, as JSON.
+- **`CONVERGENT_SPANS_DIR`**: write the spans the filters keep to
+  `spans.jsonl` in this directory. Read by `init()` only.
+- **`CONVERGENT_TRACES_EXPORTER`**: `console` adds a console destination to
+  the others.
+- **`CONVERGENT_DEBUG`**: `1` gives the `convergent.sdk` logger a level of its
+  own.
+- **`CONVERGENT_STRICT`**: `1` makes a configuration that cannot work raise
+  and stop the process at startup, instead of the default log-and-disable.

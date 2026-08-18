@@ -44,6 +44,8 @@ Remember that existing exporters also receive recorded content.
 
 ## Filter what is sent
 
+The filters exist since SDK 0.0.5.
+If the installed version is older, stop and return `needs user`.
 Use `require_span_attributes={...}` to send only spans with allowed values.
 Use `reject_span_attributes={...}` to withhold spans with named values.
 Set the same filters with `CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` or `CONVERGENT_REJECT_SPAN_ATTRIBUTES`.
@@ -51,8 +53,15 @@ Each variable takes a JSON object, for example `{"customer.id": ["acme"]}`.
 A keyword argument wins over its variable.
 Both filters accept any attribute key from a span attribute, a resource attribute, or a
 `context_attributes=` mark.
-Mark each request with `context_attributes=` on `span()` before you add `require_span_attributes=`.
+Mark each request with `context_attributes=` on `span()` before you add a filter.
+The filter decides each span alone.
+A kept parent does not keep its children.
+Matching is exact by type and case.
+Copy the key and each value from a recorded span, not from the request text.
 The filters run in front of every destination, including a local spans directory.
+The filters govern only destinations the SDK set up.
+Exporters the application added still receive every span, recorded content included.
+When the request is about privacy, report that to the user.
 If no source holds the key, `require_span_attributes=` sends nothing.
 An unmarked span under `reject_span_attributes=` is sent.
 
@@ -60,7 +69,11 @@ Prove a new or changed filter with one recording.
 Exercise one request the filter keeps and one it withholds, into a temporary spans directory.
 Require the recording to hold exactly the kept run, with its `convergent.attributes.<key>` marks.
 Require zero spans from the withheld request.
-Confirm the printed `check()` report names the filter in its `filters` row.
+Under `require_span_attributes=`, check the whole spans file, not one agent's subtree.
+Every unmarked span in the process is withheld, other agents included.
+Read the spans file.
+An HTTP status is not proof.
+Confirm the printed `check()` report names the filter in its `filters` row (the row exists since SDK 0.0.6).
 An empty recording means the mark is missing or every request was withheld; check the mark first.
 
 ## Preserve import order
@@ -129,7 +142,9 @@ Inspect the resulting `spans*.jsonl` file with `convergent-verify`.
 
 Call `convergent.check()` after `convergent.init()` in the same process.
 Flush before you check, or the report shows no linked agents yet.
-Use a temporary route or hook when the target is a long-lived server.
+When the report names no agent, wait 30 seconds and check once more.
+When the target is a long-lived server, add one temporary route that flushes and then checks.
+Delete that route after verification.
 Print the report after the traced call and flush.
 Remove the temporary check code after verification.
 Require `round trip ok` before claiming network delivery.

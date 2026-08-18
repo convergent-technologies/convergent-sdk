@@ -30,6 +30,21 @@ def answer(question: str) -> str:
     ...
 ```
 
+`attributes` lands on the run span alone. To put a key on the run and on every
+span inside it — which is what the [span filters](reference/api.md#span-filters)
+read first — pass `context_attributes=`. When the value varies per request, open
+the run with `span()`, because a decorator's mapping is fixed when the module
+loads.
+
+```python
+with convergent.span(
+    name="support-agent",
+    operation="agent_run",
+    context_attributes={"customer.id": customer_id},
+):
+    ...
+```
+
 ## Mark the tool calls
 
 `tool()` records one tool call. Left without a name it takes the function's own
@@ -112,7 +127,11 @@ def answer(question: str, tier: str) -> str:
 ```
 
 The decorator's own `attributes` takes values you know when you write the code.
-`set_attribute()` takes the ones you only know at runtime.
+`set_attribute()` takes the ones you only know at runtime. Both land on that one
+span and neither reaches a child span, so the
+[span filters](reference/api.md#span-filters) cannot use them to keep or exclude
+a whole run. Pass `context_attributes=` for that; see
+[Mark the agent run](#mark-the-agent-run).
 
 Call it anywhere without guarding it. Outside a span, or before `init()`, it
 hands back an object whose methods do nothing.

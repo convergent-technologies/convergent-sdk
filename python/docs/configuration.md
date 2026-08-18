@@ -48,8 +48,12 @@ wins.
 
 `CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` and `CONVERGENT_REJECT_SPAN_ATTRIBUTES`
 fill `require_span_attributes` and `reject_span_attributes` the same way. Each
-holds the mapping as JSON, e.g. `'{"customer.id": ["acme"]}'`. A value that is
-not JSON is rejected the way a malformed argument is.
+holds the mapping as JSON, e.g. `'{"customer.id": "acme"}'`. A value that is
+not JSON is rejected the way a malformed argument is. The variable configures
+the filter and marks nothing: a span passes `CONVERGENT_REQUIRE_SPAN_ATTRIBUTES`
+only when a `context_attributes=` mark, the span's own attribute, or a resource
+attribute holds the key. See
+[Mark the agent run](instrument.md#mark-the-agent-run).
 
 `CONVERGENT_SPANS_DIR` is read by `init()` only; `otel.install()` takes no
 destinations. The variable adds a file destination beside any `destinations`
