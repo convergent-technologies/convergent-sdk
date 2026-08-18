@@ -15,7 +15,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, SpanProcessor, TracerProvider
 
-from . import _processors, _registry, _semantic, _transport
+from . import _policy, _processors, _registry, _semantic, _transport
 from ._config import (
     _FLAG_ON,
     _clean,
@@ -62,6 +62,12 @@ class Status:
     mode: Literal["owned", "attached"] = "owned"
     app_url: str | None = None
     reason: str | None = None
+    #: The running filter policy, each direction normalized to attribute name ->
+    #: values. This echoes what validation kept after the keyword argument beat
+    #: its environment variable, so it is what filters spans, not what one
+    #: caller passed. ``None`` when that direction is not configured.
+    require_span_attributes: Mapping[str, list[str | bool | int | float]] | None = None
+    reject_span_attributes: Mapping[str, list[str | bool | int | float]] | None = None
 
 
 class Credentials(NamedTuple):
@@ -495,6 +501,7 @@ def live_status() -> Status:
         return Status(
             enabled=False, reason=reason, release=failed.release if failed is not None else None
         )
+    policy = config.policy
     return Status(
         enabled=True,
         deployment=state.deployment.get("convergent.deployment.id"),
@@ -505,6 +512,8 @@ def live_status() -> Status:
         # Spans the caller's own tracers record still reach us through their
         # processor, so this is enabled with one part of it not working.
         reason="no_provider" if unreachable else None,
+        require_span_attributes=_policy.as_mapping(policy.require) if policy else None,
+        reject_span_attributes=_policy.as_mapping(policy.reject) if policy else None,
     )
 
 

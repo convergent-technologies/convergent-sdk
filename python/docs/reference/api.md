@@ -518,6 +518,12 @@ Returned by `init()`.
 | `mode` | `str` | `"owned"`, `"attached"` | whether `init()` created the tracer provider or attached to yours |
 | `app_url` | `str \| None` | — | where this deployment is in the workspace. `None` today, because nothing fills it in yet |
 | `reason` | `str \| None` | `None`, `"missing_config"`, `"invalid_config"`, `"setup_failed"`, `"no_provider"`, `"already_configured"` | `None`, or why part of the setup is not working |
+| `require_span_attributes` | `Mapping \| None` | — | the running require filter, as attribute name to value list. `None` when not configured |
+| `reject_span_attributes` | `Mapping \| None` | — | the running reject filter, same shape. `None` when not configured |
+
+The two filter fields echo what validation kept after a keyword argument beat
+its environment variable, so they state what this process filters on. The
+printed `check()` report shows them as one `filters` row, reject first.
 
 `agents` reports registration with the server. The filter described in
 [Filtering what is sent](../opentelemetry.md#filtering-what-is-sent) enforces

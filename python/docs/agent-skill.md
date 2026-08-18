@@ -14,9 +14,9 @@ It reports evidence-backed findings.
 It changes no code.
 
 The skill tells the agent to work from current sources: it installs the latest
-`convergent-sdk` when the project does not pin one, and it reads the live docs
-through [llms.txt](https://app.convergent.dev/docs/llms.txt) before it edits
-code.
+`convergent-sdk` when the project does not pin one, and it reads the current
+docs from the [SDK repository](https://github.com/convergent-technologies/convergent-sdk/tree/main/python/docs)
+before it edits code.
 
 ## Install the skills
 

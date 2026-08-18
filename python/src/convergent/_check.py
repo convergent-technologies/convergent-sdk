@@ -135,6 +135,9 @@ class Report:
                 _row("mode", _MODES.get(status.mode, status.mode)),
                 _row("sending to", ", ".join(status.destinations) or "nothing"),
             ]
+            filters = self._filters_line()
+            if filters:
+                lines.append(_row("filters", filters))
         else:
             lines.append(_row("reason", status.reason or "unknown"))
         # A reason can also arrive alongside enabled, for a part of the setup that
@@ -153,6 +156,27 @@ class Report:
             *self._notes_block(),
         ]
         return "\n".join(lines)
+
+    def _filters_line(self) -> str:
+        """The running filter policy, reject first because reject wins.
+
+        Empty when no filter is configured, so the common report stays short.
+        These are values the caller configured, not server text, so they print
+        as given.
+        """
+        directions = (
+            ("reject", self.status.reject_span_attributes),
+            ("require", self.status.require_span_attributes),
+        )
+        return "; ".join(
+            f"{direction} "
+            + ", ".join(
+                name + "=" + "|".join(str(value) for value in values)
+                for name, values in sorted(mapping.items())
+            )
+            for direction, mapping in directions
+            if mapping is not None
+        )
 
     def _round_trip_line(self) -> str:
         if self.round_trip == "ok":

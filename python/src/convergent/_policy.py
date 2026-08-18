@@ -235,4 +235,20 @@ def _parse_values(value: object, name: object, label: str) -> frozenset[tuple[ty
     return frozenset((type(item), item) for item in validated)
 
 
-__all__ = ["Condition", "Policy", "build", "decide"]
+def as_mapping(
+    conditions: frozenset[Condition] | None,
+) -> dict[str, list[_ScalarValue]] | None:
+    """The conditions as the mapping a caller could pass back in.
+
+    Values sort by repr, so two processes running one configuration echo one
+    text. ``None`` echoes an unconfigured direction.
+    """
+    if conditions is None:
+        return None
+    return {
+        condition.name: sorted((value for _, value in condition.values), key=repr)
+        for condition in conditions
+    }
+
+
+__all__ = ["Condition", "Policy", "as_mapping", "build", "decide"]

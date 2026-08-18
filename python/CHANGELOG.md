@@ -4,6 +4,13 @@ Each released version has a `## <version>` section here, and the release
 workflow publishes that section as the GitHub Release notes. The newest
 section may describe a version whose tag does not exist yet.
 
+## 0.0.6
+
+- `Status` echoes the running filter policy in `require_span_attributes` and
+  `reject_span_attributes`, normalized to attribute name → value list. The
+  printed `check()` report shows the policy as one `filters` row, reject
+  first. A wrong filter no longer hides behind `round trip ok`.
+
 ## 0.0.5
 
 - `init(require_span_attributes=)` and `init(reject_span_attributes=)` filter

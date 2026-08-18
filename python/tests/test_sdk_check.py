@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -47,6 +48,8 @@ def reset_sdk(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "CONVERGENT_DEBUG",
         "CONVERGENT_TRACES_EXPORTER",
         "CONVERGENT_STRICT",
+        "CONVERGENT_REQUIRE_SPAN_ATTRIBUTES",
+        "CONVERGENT_REJECT_SPAN_ATTRIBUTES",
     ):
         monkeypatch.delenv(name, raising=False)
     _reset_otel()
@@ -401,3 +404,84 @@ def test_an_unnamed_linked_agent_is_listed_by_id(
     report = convergent.check()
 
     assert report.agents == ["agt_9"]
+
+
+def test_status_echoes_the_running_filters(tmp_path: Path) -> None:
+    """A bare scalar echoes as a one-value list: the echo is what runs, not what was typed."""
+    status = convergent.init(
+        release=_RELEASE,
+        destinations=[convergent.File(str(tmp_path))],
+        require_span_attributes={"customer.id": "acme"},
+        reject_span_attributes={"tier": ["test", "internal"]},
+    )
+
+    assert status.require_span_attributes == {"customer.id": ["acme"]}
+    assert status.reject_span_attributes == {"tier": ["internal", "test"]}
+
+
+def test_status_echoes_filters_set_by_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CONVERGENT_REQUIRE_SPAN_ATTRIBUTES", '{"customer.id": ["acme"]}')
+
+    status = convergent.init(release=_RELEASE, destinations=[convergent.File(str(tmp_path))])
+
+    assert status.require_span_attributes == {"customer.id": ["acme"]}
+    assert status.reject_span_attributes is None
+
+
+def test_a_filter_argument_beats_its_environment_variable_in_the_echo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CONVERGENT_REQUIRE_SPAN_ATTRIBUTES", '{"customer.id": ["globex"]}')
+
+    status = convergent.init(
+        release=_RELEASE,
+        destinations=[convergent.File(str(tmp_path))],
+        require_span_attributes={"customer.id": ["acme"]},
+    )
+
+    assert status.require_span_attributes == {"customer.id": ["acme"]}
+
+
+def test_install_status_echoes_the_running_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        _transport, "build_processor", lambda **_: SimpleSpanProcessor(InMemorySpanExporter())
+    )
+    monkeypatch.setattr(_registry, "post_json", lambda *_, **__: {"deployment_id": "dep_abc"})
+    convergent.otel.install(
+        TracerProvider(),
+        api_key=_KEY,
+        endpoint=_ENDPOINT,
+        release=_RELEASE,
+        reject_span_attributes={"customer.id": ["initech"]},
+    )
+    _record_gets(monkeypatch, _HEALTHY)
+
+    report = convergent.check()
+
+    assert report.status.reject_span_attributes == {"customer.id": ["initech"]}
+    assert report.status.require_span_attributes is None
+
+
+def test_the_printed_report_names_the_running_filters() -> None:
+    report = Report(
+        Status(
+            enabled=True,
+            release=_RELEASE,
+            destinations=["convergent"],
+            require_span_attributes={"customer.id": ["acme"]},
+            reject_span_attributes={"tier": ["internal", "test"]},
+        )
+    )
+
+    line = next(line for line in str(report).splitlines() if line.lstrip().startswith("filters"))
+
+    assert "reject tier=internal|test" in line, "reject prints first because reject wins"
+    assert "require customer.id=acme" in line
+
+
+def test_a_report_with_no_filters_has_no_filters_row() -> None:
+    report = Report(Status(enabled=True, release=_RELEASE, destinations=["convergent"]))
+
+    assert "filters" not in str(report)
