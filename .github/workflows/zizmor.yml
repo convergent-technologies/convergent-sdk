@@ -16,9 +16,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+      - name: Run zizmor
+        run: |
+          curl -LsSf "https://astral.sh/uv/0.11.14/install.sh" | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uvx zizmor --min-severity medium .github/workflows/

@@ -34,9 +34,15 @@ jobs:
           persist-credentials: false
       - name: Check the tag names pyproject's version
         if: github.ref_type == 'tag'
-        uses: samuelcolvin/check-python-version@ee87cddb8049d2694cc03badc8569765a05cef00 # v5
-        with:
-          version_file_path: python/pyproject.toml
+        run: |
+          python3 - <<'PY'
+          import os, sys, tomllib
+          version = tomllib.load(open("python/pyproject.toml", "rb"))["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              sys.exit(f"tag {tag} does not name pyproject version {version}")
+          print(f"tag {tag} names version {version}")
+          PY
       - name: Install uv
         run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
       - run: uv build
