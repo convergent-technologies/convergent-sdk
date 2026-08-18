@@ -4,7 +4,7 @@ Each released version has a `## <version>` section here, and the release
 workflow publishes that section as the GitHub Release notes. The newest
 section may describe a version whose tag does not exist yet.
 
-## Unreleased
+## 0.0.5
 
 - `init(require_span_attributes=)` and `init(reject_span_attributes=)` filter
   what is sent by attribute value: a span goes to the destinations the SDK set
