@@ -60,6 +60,16 @@ Check these facts:
 14. Streamed spans close after stream completion.
 15. Subagents nest under their caller.
 16. The recording contains no unexpected sensitive content.
+17. Filtered recordings hold exactly the expected runs.
+
+Check fact 17 in both directions when the run uses `require_span_attributes=`
+or `reject_span_attributes=`.
+Confirm each kept span carries its expected `convergent.attributes.<key>` mark.
+Confirm the recording contains no run the filter must withhold.
+Remember the filters run in front of every destination, so a withheld run
+appears in no spans file.
+Treat an empty recording under `require_span_attributes=` as a missing mark
+before treating it as broken instrumentation.
 
 Read the matching SDK integration page before judging a non-`convergent.sdk` scope.
 Inspect the relevant raw span when the rendering lacks non-content evidence.

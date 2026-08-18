@@ -53,6 +53,8 @@ SUMMARY_KEYS = {
     TOOL_CALL: ("gen_ai.tool.name", "gen_ai.tool.call.id"),
 }
 
+MARK_PREFIX = "convergent.attributes."
+
 CONTENT_KEYS = {
     "gen_ai.input.messages": "input",
     "gen_ai.output.messages": "output",
@@ -234,6 +236,9 @@ def _summary(span: Span) -> str:
         value = span.attributes.get(key)
         label = key.removeprefix("gen_ai.")
         parts.append(f"{label}={_clip(value)}" if value is not None else f"{label}=MISSING")
+    for key in sorted(span.attributes):
+        if key.startswith(MARK_PREFIX):
+            parts.append(f"{key.removeprefix('convergent.')}={_clip(span.attributes[key])}")
     duration = span.duration_ms
     parts.append(f"duration={duration:.0f}ms" if duration is not None else "duration=MISSING")
     if span.status not in {"STATUS_CODE_UNSET", "STATUS_CODE_OK", "0", "1"}:
@@ -263,6 +268,12 @@ def counts(spans: list[Span]) -> list[str]:
             if isinstance(value, str) and value
         }
     )
+    marks = Counter(
+        f"{key.removeprefix(MARK_PREFIX)}={_clip(value)}"
+        for span in spans
+        for key, value in span.attributes.items()
+        if key.startswith(MARK_PREFIX)
+    )
     return [
         f"selected spans: {len(spans)}",
         f"traces: {len({span.trace_id for span in spans})}",
@@ -271,6 +282,12 @@ def counts(spans: list[Span]) -> list[str]:
         f"model calls with token usage: {with_usage}",
         f"tool calls: {roles[TOOL_CALL]}",
         "releases: " + (", ".join(_clip(release) for release in releases) if releases else "none"),
+        "marks: "
+        + (
+            ", ".join(f"{mark} ({count} spans)" for mark, count in sorted(marks.items()))
+            if marks
+            else "none"
+        ),
         "operations: "
         + ", ".join(f"{_clip(key)}={value}" for key, value in sorted(operations.items())),
         "scopes: " + ", ".join(f"{_clip(key)}={value}" for key, value in sorted(scopes.items())),

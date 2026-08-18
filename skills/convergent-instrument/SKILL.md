@@ -16,8 +16,14 @@ If the project does not pin `convergent-sdk`, install the latest release.
 If the project pins an older `convergent-sdk`, tell the user before you rely on newer docs.
 Read [references/python.md](references/python.md) before changing code.
 Read only the sections that match the target agent.
-When internet access exists, read the current docs first:
-fetch <https://app.convergent.dev/docs/llms.txt> and follow the matching page.
+When internet access exists, read the current docs first.
+Read the installed `convergent-sdk` version and use its tag in the doc URLs.
+Fetch `https://raw.githubusercontent.com/convergent-technologies/convergent-sdk/v<version>/python/docs/meta.json` to list the doc pages.
+Fetch the matching page from `https://raw.githubusercontent.com/convergent-technologies/convergent-sdk/v<version>/python/docs/<page>.md`.
+When the tag fetch fails, fetch the same paths from `main` instead.
+Do not guess a page name.
+When a fetched page and [references/python.md](references/python.md) disagree, trust the fetched page.
+When a fetch fails, use [references/python.md](references/python.md) and the installed package source, and do not retry.
 Inspect the installed package version and source before using an API.
 Use installed code for exact imports and signatures.
 Do not invent an SDK API.

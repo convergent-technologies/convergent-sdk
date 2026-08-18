@@ -6,11 +6,11 @@ Use this reference after the target agent and model client are known.
 
 When internet access exists, read the matching public SDK page before editing:
 
-- [Python SDK](https://github.com/convergent-technologies/convergent-sdk/blob/stable/python/docs/index.md)
-- [Instrumentation](https://github.com/convergent-technologies/convergent-sdk/blob/stable/python/docs/instrument.md)
-- [Model integrations](https://github.com/convergent-technologies/convergent-sdk/blob/stable/python/docs/integrations/index.md)
-- [Existing OpenTelemetry](https://github.com/convergent-technologies/convergent-sdk/blob/stable/python/docs/opentelemetry.md)
-- [Troubleshooting](https://github.com/convergent-technologies/convergent-sdk/blob/stable/python/docs/troubleshooting.md)
+- [Python SDK](https://github.com/convergent-technologies/convergent-sdk/blob/main/python/docs/index.md)
+- [Instrumentation](https://github.com/convergent-technologies/convergent-sdk/blob/main/python/docs/instrument.md)
+- [Model integrations](https://github.com/convergent-technologies/convergent-sdk/blob/main/python/docs/integrations/index.md)
+- [Existing OpenTelemetry](https://github.com/convergent-technologies/convergent-sdk/blob/main/python/docs/opentelemetry.md)
+- [Troubleshooting](https://github.com/convergent-technologies/convergent-sdk/blob/main/python/docs/troubleshooting.md)
 
 Read the installed `convergent-sdk` version and package source.
 If no version constraint exists, upgrade to the latest release with the project's package manager.
@@ -39,14 +39,29 @@ Do not create a second tracer provider.
 Do not replace existing span processors, samplers, resources, or exporters.
 
 Use `agents=[...]` when Convergent attaches to an existing provider.
-If each request carries a span attribute, a resource attribute, or a
-`context_attributes=` mark for the key, use `require_span_attributes={...}` to send only spans
-with allowed values, or `reject_span_attributes={...}` to withhold spans with named values.
-Mark each request with `context_attributes=` on `span()` before you add `require_span_attributes=`.
-If no source holds the key, `require_span_attributes=` sends nothing to Convergent or to a
-`File` or `Console` destination. An unmarked span under `reject_span_attributes=` is sent.
-Match each filter name to `gen_ai.agent.name` exactly.
+Match each `agents=` name to `gen_ai.agent.name` exactly.
 Remember that existing exporters also receive recorded content.
+
+## Filter what is sent
+
+Use `require_span_attributes={...}` to send only spans with allowed values.
+Use `reject_span_attributes={...}` to withhold spans with named values.
+Set the same filters with `CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` or `CONVERGENT_REJECT_SPAN_ATTRIBUTES`.
+Each variable takes a JSON object, for example `{"customer.id": ["acme"]}`.
+A keyword argument wins over its variable.
+Both filters accept any attribute key from a span attribute, a resource attribute, or a
+`context_attributes=` mark.
+Mark each request with `context_attributes=` on `span()` before you add `require_span_attributes=`.
+The filters run in front of every destination, including a local spans directory.
+If no source holds the key, `require_span_attributes=` sends nothing.
+An unmarked span under `reject_span_attributes=` is sent.
+
+Prove a new or changed filter with one recording.
+Exercise one request the filter keeps and one it withholds, into a temporary spans directory.
+Require the recording to hold exactly the kept run, with its `convergent.attributes.<key>` marks.
+Require zero spans from the withheld request.
+Confirm the printed `check()` report names the filter in its `filters` row.
+An empty recording means the mark is missing or every request was withheld; check the mark first.
 
 ## Preserve import order
 
@@ -113,8 +128,10 @@ Inspect the resulting `spans*.jsonl` file with `convergent-verify`.
 ## Confirm hosted delivery
 
 Call `convergent.check()` after `convergent.init()` in the same process.
+Flush before you check, or the report shows no linked agents yet.
+Use a temporary route or hook when the target is a long-lived server.
 Print the report after the traced call and flush.
-Remove temporary check output after verification.
+Remove the temporary check code after verification.
 Require `round trip ok` before claiming network delivery.
 Require the target agent name before claiming the server received the recording.
 Keep local recording verification separate from this check.
