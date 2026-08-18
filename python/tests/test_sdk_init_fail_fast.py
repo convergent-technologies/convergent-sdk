@@ -529,7 +529,7 @@ def test_a_raising_init_leaves_the_module_unconfigured() -> None:
 
     assert _core.live_status().reason == "missing_config"
     assert _core._config is None
-    assert _core._processors == []
+    assert _core._drain == []
 
 
 def test_a_valid_init_after_a_raising_one_configures_the_process() -> None:
@@ -774,7 +774,7 @@ def test_a_raising_file_probe_leaves_no_processor_behind(tmp_path: Path) -> None
         )
 
     assert _core._running_config() is None
-    assert _core._processors == []
+    assert _core._drain == []
     assert not _core.live_status().enabled
 
     status = convergent.init(strict=True, release="r1", destinations=[convergent.File(good)])

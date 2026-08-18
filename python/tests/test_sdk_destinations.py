@@ -461,7 +461,7 @@ def test_flush_after_a_clean_provider_teardown_still_reports_ok(
 ) -> None:
     """A closed exporter has nothing buffered, so flushing it trivially succeeded.
 
-    The closed processor stays in ``_core._processors``, and ``BatchSpanProcessor``
+    The closed processor stays in ``_core._drain``, and ``BatchSpanProcessor``
     answers False once shut down -- so a process that tore its provider down
     cleanly, then called ``flush()``, would be told the flush failed.
     """

@@ -33,7 +33,7 @@ fixed by the time the SDK attaches, so the deployment identity cannot go there.
 The SDK puts it on each span instead, and a trace from an attached process links
 to its deployment either way.
 
-## Agent filter
+## Filtering what is sent
 
 By default we receive every span the process records. That is usually right when
 the process has no other OpenTelemetry setup.
@@ -63,9 +63,49 @@ applies only to a list with names in it.
 An agent whose work crosses two processes needs `agents` in both. Nothing about
 the declaration travels between them.
 
-The filter sits in front of Convergent's exporters only. Your own exporters keep
-receiving everything they received before, including a file or console destination
-of your own.
+To narrow by request instead of by agent, pass `require_span_attributes={...}` with the
+attribute values a span must hold, or `reject_span_attributes={...}` with the values that
+keep a span home. Mark each request with `context_attributes=` on the span
+that wraps it.
+
+```python
+with convergent.span(
+    name="support-agent",
+    operation="agent_run",
+    context_attributes={"customer.id": "acme"},
+):
+    run_support_request(request)
+```
+
+Two span processors do the work. A stamper copies every `context_attributes=`
+pair onto each span started inside the block, library spans included, as
+`convergent.attributes.<key>`, so the mark collides with no attribute of your
+own. The pairs live in the OpenTelemetry context for the block's lifetime.
+They stay in your process: nothing writes them to outbound requests. A filter
+processor then decides each span when it ends. It reads a key from the stamped
+mark first, then from the span's own attributes, then from the resource
+attributes. `reject_span_attributes` decides first: one matching key withholds
+the span. `require_span_attributes` decides next: the span is forwarded only
+when every named key holds an allowed value.
+`require_span_attributes={"customer.id": ["acme"]}` sends a span only when its
+customer key is `acme`, so an excluded customer's traffic stays in your
+process. `reject_span_attributes={"customer.id": ["internal-test"]}` withholds
+that customer's spans and sends everything else, unmarked spans included. An
+unmarked span never passes `require_span_attributes`. Comparison is exact, by
+type and case. A list-valued or enum-valued span attribute never matches, so
+`reject_span_attributes` cannot exclude it and `require_span_attributes`
+withholds it. The filters and `agents` combine: a span is sent only when every
+configured filter keeps it.
+
+Each service marks its own requests and sets its own filters. Nothing about
+the mark or the filters travels between processes. A service without filters
+sends everything it records.
+
+The filters sit in front of every destination the SDK sets up, including a
+`convergent.File` or `convergent.Console` you passed in `destinations`.
+Processors you added to the provider yourself are the ones that keep receiving
+everything they received before, and an exporter you point at Convergent's
+ingest endpoint yourself bypasses the filters.
 
 ## Pass the provider yourself
 
@@ -118,7 +158,7 @@ it, so one added with `add_span_processor()` alone can only find a provider you
 installed globally.
 
 `install()` takes the provider first, then `api_key`, `endpoint`, `release`,
-and `agents`, which mean what they mean on `init()`. It has no
+`agents`, `require_span_attributes`, and `reject_span_attributes`, which mean what they mean on `init()`. It has no
 `destinations`, `tracer_provider`, or `debug` argument, because the provider and
 everything on it are yours. It needs an API key. Construction makes no network
 call, and the first span starts deployment registration on a thread of its own.
@@ -211,8 +251,8 @@ as no context and the consumer starts a trace of its own. When the transport
 changes the case of its keys, pass `extract()` a getter of your own that matches
 without regard to case.
 
-Call `init()` in each process, and pass `agents` in each process when you pass it
-at all.
+Call `init()` in each process, and pass `agents`, `require_span_attributes`, and `reject_span_attributes` in
+each process when you pass them at all.
 
 ## Span links
 

@@ -1,10 +1,10 @@
 """Everything the SDK does to a span, behind one OpenTelemetry span processor.
 
 ``init()`` creates a tracer provider, or attaches to the one it finds or the one
-it was handed, and wires the semantic stamps, the declared agent filter, and the
-network exporter onto it. A caller who builds a provider and wants no ``init()``
-at all adds this processor instead and gets the same three pieces in the same
-order.
+it was handed, and wires the semantic stamps, the context stamper, the egress
+filters, and the network exporter onto it. A caller who builds a provider and
+wants no ``init()`` at all adds this processor instead and gets the same pieces
+in the same order.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import logging
 import os
 import threading
 import weakref
+from collections.abc import Mapping
 
 from opentelemetry import trace
 from opentelemetry.context import (
@@ -24,7 +25,7 @@ from opentelemetry.context import (
 )
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor, TracerProvider
 
-from . import _config, _core, _egress, _transport
+from . import _config, _core, _processors, _transport
 from ._semantic import SemanticSpanProcessor
 
 logger = logging.getLogger("convergent.sdk")
@@ -47,6 +48,8 @@ def install(
     endpoint: str | None = None,
     release: str | None = None,
     agents: list[str] | None = None,
+    require_span_attributes: Mapping[str, object] | None = None,
+    reject_span_attributes: Mapping[str, object] | None = None,
     strict: bool = False,
 ) -> ConvergentSpanProcessor:
     """Add Convergent to ``provider``, and record ``span()`` and ``observe()``
@@ -72,6 +75,9 @@ def install(
     provider that will not carry the processor is a different matter, and that
     one is logged.
 
+    ``agents``, ``require_span_attributes``, and ``reject_span_attributes``
+    filter what is sent the way ``init()``'s do.
+
     Raises:
         TypeError: ``provider`` is not an ``opentelemetry.sdk.trace.TracerProvider``
             (always), or an argument has the wrong type (strict only).
@@ -85,6 +91,8 @@ def install(
         endpoint=endpoint,
         release=release,
         agents=agents,
+        require_span_attributes=require_span_attributes,
+        reject_span_attributes=reject_span_attributes,
         tracer_provider=provider,
         strict=strict,
     )
@@ -110,9 +118,11 @@ class ConvergentSpanProcessor(SpanProcessor):
         provider.add_span_processor(ConvergentSpanProcessor(release="1.4.0"))
 
     The arguments are ``init()``'s, without ``destinations``, because the provider
-    and everything else on it are yours. Each one falls back to the environment
-    variable ``init()`` reads. The endpoint then falls back to the managed ingest
-    endpoint when an API key is present.
+    and everything else on it are yours. ``api_key``, ``endpoint``, ``release``,
+    ``require_span_attributes``, ``reject_span_attributes``, and ``strict``
+    fall back to the environment variable ``init()`` reads; ``agents`` and
+    ``tracer_provider`` have none. The endpoint then falls back to the managed
+    ingest endpoint when an API key is present.
 
     Construction makes no network call, and no span ever waits for one. The first
     span starts the deployment registration on a thread of its own. Until it
@@ -140,11 +150,19 @@ class ConvergentSpanProcessor(SpanProcessor):
     Raises:
         Only when ``strict`` is on, from the argument or ``CONVERGENT_STRICT``.
         TypeError: ``api_key``, ``endpoint`` or ``release`` is not a string,
-            ``agents`` is not a list of names, or ``tracer_provider`` is not an
+            ``agents`` is not a list of names, ``require_span_attributes`` or
+            ``reject_span_attributes`` is not a mapping of attribute names to
+            values, or ``tracer_provider`` is not an
             ``opentelemetry.sdk.trace.TracerProvider``.
         ValueError: no api key or no release is configured, an agent name is
             empty or oversized, there are more names than registration accepts,
-            or the endpoint is not an http or https URL.
+            the ``require_span_attributes`` or ``reject_span_attributes``
+            mapping or an attribute name in it is empty, a
+            ``require_span_attributes`` or ``reject_span_attributes`` value is
+            ``None`` -- pass an empty list to match nothing -- a
+            ``CONVERGENT_REQUIRE_SPAN_ATTRIBUTES`` or
+            ``CONVERGENT_REJECT_SPAN_ATTRIBUTES`` that is not JSON, or the
+            endpoint is not an http or https URL.
     """
 
     def __init__(
@@ -154,6 +172,8 @@ class ConvergentSpanProcessor(SpanProcessor):
         endpoint: str | None = None,
         release: str | None = None,
         agents: list[str] | None = None,
+        require_span_attributes: Mapping[str, object] | None = None,
+        reject_span_attributes: Mapping[str, object] | None = None,
         tracer_provider: TracerProvider | None = None,
         strict: bool = False,
     ) -> None:
@@ -175,7 +195,15 @@ class ConvergentSpanProcessor(SpanProcessor):
         _instances.add(self)
         running = _core._running_config()
         if running is not None:
-            asked = _asked_for(api_key, endpoint, release, agents, tracer_provider)
+            asked = _asked_for(
+                api_key,
+                endpoint,
+                release,
+                agents,
+                require_span_attributes,
+                reject_span_attributes,
+                tracer_provider,
+            )
             self._drop(asked, running, None)
             return
         try:
@@ -184,6 +212,8 @@ class ConvergentSpanProcessor(SpanProcessor):
                 endpoint=endpoint,
                 release=release,
                 agents=agents,
+                require_span_attributes=require_span_attributes,
+                reject_span_attributes=reject_span_attributes,
                 tracer_provider=tracer_provider,
                 strict=strict,
             )
@@ -204,6 +234,7 @@ class ConvergentSpanProcessor(SpanProcessor):
                 return
             self._start_registration()
             semantic.on_start(span, parent_context)
+            _processors._STAMPER.on_start(span, parent_context)
             for destination in self._destinations:
                 destination.on_start(span, parent_context)
         except Exception:
@@ -260,14 +291,10 @@ class ConvergentSpanProcessor(SpanProcessor):
         if running is not None:
             self._drop(config, running, exporter)
             return
-        # One filter in front of the exporter, and the exporter itself handed to
-        # _core, for the reason _attach_processors gives: flush() reads a queue
-        # that lives on the exporter rather than on the filter wrapping it.
-        self._destinations = (
-            (_egress.DeclaredAgentFilter(config.agents, [exporter]),)
-            if config.agents is not None
-            else (exporter,)
-        )
+        # The filters sit in front of the exporter, and the exporter itself is
+        # handed to _core, for the reason _attach_processors gives: flush() reads
+        # a queue that lives on the exporter rather than on a filter wrapping it.
+        self._destinations = _processors.wrap(config.policy, config.agents, (exporter,))
         self._config = config
         self._semantic = SemanticSpanProcessor(config.release, deployment)
 
@@ -276,8 +303,8 @@ class ConvergentSpanProcessor(SpanProcessor):
         config = self._config
         if config is None:
             return
-        # _core._processors holds the raw exporter, not the DeclaredAgentFilter
-        # that may wrap it in self._destinations.
+        # _core._drain holds the raw exporter, not any filter that may wrap
+        # it in self._destinations.
         _core._abandon(config, [self._exporter] if self._exporter is not None else ())
         self._config = None
         # Disarmed the way a processor that lost the claim is disarmed, and shut down
@@ -433,6 +460,8 @@ def _asked_for(
     endpoint: str | None,
     release: str | None,
     agents: list[str] | None,
+    require_span_attributes: Mapping[str, object] | None,
+    reject_span_attributes: Mapping[str, object] | None,
     tracer_provider: TracerProvider | None,
 ) -> _config._Config | None:
     """The configuration a dropped processor asked for, or ``None`` when its own
@@ -447,6 +476,8 @@ def _asked_for(
             endpoint=endpoint,
             release=release,
             agents=agents,
+            require_span_attributes=require_span_attributes,
+            reject_span_attributes=reject_span_attributes,
             tracer_provider=tracer_provider,
             strict=False,
         )

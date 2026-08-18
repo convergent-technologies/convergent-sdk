@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any, NamedTuple
 
 import pytest
@@ -18,7 +19,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 import convergent
 import convergent.otel
 from convergent.otel import ConvergentSpanProcessor
-from convergent import _core, _otel, _registry, _transport
+from convergent import _core, _otel, _processors, _registry, _transport
 
 KEY = "test-key"  # pragma: allowlist secret
 ENDPOINT = "https://example.test"
@@ -121,6 +122,17 @@ def _run_one_agent() -> None:
 
 def _names(exporter: InMemorySpanExporter) -> set[str]:
     return {span.name for span in exporter.get_finished_spans()}
+
+
+@contextmanager
+def _marked(pairs: Mapping[str, str]) -> Iterator[None]:
+    """The context carrier around a block, the way ``span(context_attributes=)``
+    attaches it, for library spans no ``span()`` call wraps."""
+    token = _processors.attach_context(pairs)
+    try:
+        yield
+    finally:
+        _processors.detach_context(token)
 
 
 # --- the acceptance bar ------------------------------------------------------
@@ -369,7 +381,7 @@ def test_a_processor_added_after_init_sends_nothing_and_names_what_it_dropped(
     theirs = InMemorySpanExporter()
     _serve(monkeypatch, theirs)
     convergent.init(api_key=KEY, endpoint=ENDPOINT, release="r1")
-    drained = len(_core._processors)
+    drained = len(_core._drain)
 
     ours = InMemorySpanExporter()
     exporter = BatchSpanProcessor(ours)
@@ -405,7 +417,7 @@ def test_a_processor_added_after_init_sends_nothing_and_names_what_it_dropped(
 
     assert ours.get_finished_spans() == (), "a dropped processor exports nothing"
     assert shut_down_on_its_own, "and it does not leave an exporter running"
-    assert len(_core._processors) == drained, "and it is never added to the drain"
+    assert len(_core._drain) == drained, "and it is never added to the drain"
     assert _core.live_status().destinations == ["convergent"]
     dropped = [r for r in caplog.records if "sends nothing" in r.message]
     assert len(dropped) == 1
@@ -600,7 +612,7 @@ def test_two_lost_processors_warn_once_each(
     warning, so a caller can see every dropped privacy or routing choice."""
     _serve(monkeypatch, InMemorySpanExporter())
     convergent.init(api_key=KEY, endpoint=ENDPOINT, release="r1")
-    drained = len(_core._processors)
+    drained = len(_core._drain)
 
     with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
         convergent.otel.install(
@@ -619,7 +631,7 @@ def test_two_lost_processors_warn_once_each(
 
     dropped = [r for r in caplog.records if "sends nothing" in r.message]
     assert len(dropped) == 2, "each different loser warns once"
-    assert len(_core._processors) == drained, "no exporter is added to the drain"
+    assert len(_core._drain) == drained, "no exporter is added to the drain"
 
 
 def test_an_init_that_loses_to_a_processor_says_what_it_dropped(
@@ -702,7 +714,7 @@ def test_install_add_failure_removes_the_exporter_with_declared_agents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When add_span_processor() raises and the processor has a declared-agent filter,
-    the raw exporter (not the filter) must be removed from _core._processors so the
+    the raw exporter (not the filter) must be removed from _core._drain so the
     drain list is actually empty."""
     _serve(monkeypatch, InMemorySpanExporter())
     provider = TracerProvider()
@@ -720,7 +732,7 @@ def test_install_add_failure_removes_the_exporter_with_declared_agents(
     )
 
     assert _core._config is None
-    assert len(_core._processors) == 0, "the raw exporter is removed from the drain"
+    assert len(_core._drain) == 0, "the raw exporter is removed from the drain"
 
 
 def test_first_flush_starts_registration(
@@ -777,3 +789,218 @@ def test__carries_finds_processor_inside_a_composite(
     provider.add_span_processor(Wrapper(processor))
     trace.set_tracer_provider(provider)
     assert _otel._carries(provider, processor)
+
+
+def test_require_filters_through_install(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """install() applies the same rule init(require_span_attributes=) does: the context mark
+    reaches library spans, and a request marked with an unallowed value or not
+    marked at all is withheld."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = install(require_span_attributes={"customer.id": ["acme"]}).provider
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "acme"}):
+        with tracer.start_as_current_span("acme request"):
+            with tracer.start_as_current_span("acme library work"):
+                pass
+    with _marked({"customer.id": "initech"}):
+        with tracer.start_as_current_span("initech request"):
+            pass
+    with tracer.start_as_current_span("unmarked request"):
+        pass
+
+    assert _names(exporter) == {"acme request", "acme library work"}
+
+
+def test_require_and_agents_compose_through_install(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """Both filters apply on the install() path too: a span is sent only when it
+    is a declared agent's work and the request is an allowed customer."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    install(agents=["support-agent"], require_span_attributes={"customer.id": ["acme"]})
+
+    with _marked({"customer.id": "acme"}):
+        with convergent.span(name="support-agent", operation="agent_run"):
+            pass
+    with _marked({"customer.id": "initech"}):
+        with convergent.span(name="support-agent", operation="agent_run"):
+            pass
+    with _marked({"customer.id": "acme"}):
+        with convergent.span(name="billing-agent", operation="agent_run"):
+            pass
+
+    assert _names(exporter) == {"invoke_agent support-agent"}
+
+
+def test_require_filters_through_a_processor_added_by_hand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third entry point: the caller constructs ConvergentSpanProcessor
+    themselves and adds it to their own provider."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = TracerProvider()
+    processor = ConvergentSpanProcessor(
+        api_key=KEY,
+        endpoint=ENDPOINT,
+        release="r1",
+        require_span_attributes={"customer.id": ["acme"]},
+    )
+    provider.add_span_processor(processor)
+    trace.set_tracer_provider(provider)
+    tracer = provider.get_tracer("their.framework")
+
+    try:
+        with _marked({"customer.id": "acme"}):
+            with tracer.start_as_current_span("acme request"):
+                pass
+        with _marked({"customer.id": "initech"}):
+            with tracer.start_as_current_span("initech request"):
+                pass
+
+        assert _names(exporter) == {"acme request"}
+    finally:
+        _join_registration(processor)
+        provider.shutdown()
+
+
+def test_a_malformed_require_through_install_raises_under_strict() -> None:
+    """A typo in a privacy control is loud on every entry point, not only init().
+
+    No exporter is stubbed: the raise happens at validation, before anything
+    is built.
+    """
+    provider = TracerProvider()
+
+    with pytest.raises((TypeError, ValueError)):
+        convergent.otel.install(
+            provider,
+            api_key=KEY,
+            endpoint=ENDPOINT,
+            release="r1",
+            require_span_attributes={"customer.id": object()},
+            strict=True,
+        )
+
+
+def test_reject_filters_through_install(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """install() applies the same reject_span_attributes= rule init() does: a span holding a
+    rejected pair is withheld, and an unmarked span is sent."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = install(reject_span_attributes={"customer.id": ["initech"]}).provider
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "initech"}):
+        with tracer.start_as_current_span("initech request"):
+            pass
+    with _marked({"customer.id": "acme"}):
+        with tracer.start_as_current_span("acme request"):
+            pass
+    with tracer.start_as_current_span("unmarked request"):
+        pass
+
+    assert _names(exporter) == {"acme request", "unmarked request"}
+
+
+def test_reject_filters_through_a_processor_added_by_hand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third entry point takes reject_span_attributes= too."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = TracerProvider()
+    processor = ConvergentSpanProcessor(
+        api_key=KEY,
+        endpoint=ENDPOINT,
+        release="r1",
+        reject_span_attributes={"customer.id": ["initech"]},
+    )
+    provider.add_span_processor(processor)
+    trace.set_tracer_provider(provider)
+    tracer = provider.get_tracer("their.framework")
+
+    try:
+        with _marked({"customer.id": "initech"}):
+            with tracer.start_as_current_span("initech request"):
+                pass
+        with tracer.start_as_current_span("unmarked request"):
+            pass
+
+        assert _names(exporter) == {"unmarked request"}
+    finally:
+        _join_registration(processor)
+        provider.shutdown()
+
+
+def test_the_reject_variable_configures_install(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """The processor path resolves CONVERGENT_REJECT_SPAN_ATTRIBUTES the way
+    init() does: the variable fills the direction in when the argument is
+    absent."""
+    monkeypatch.setenv("CONVERGENT_REJECT_SPAN_ATTRIBUTES", '{"customer.id": ["initech"]}')
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = install().provider
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "initech"}):
+        with tracer.start_as_current_span("initech request"):
+            pass
+    with tracer.start_as_current_span("unmarked request"):
+        pass
+
+    assert _names(exporter) == {"unmarked request"}
+
+
+def test_a_malformed_reject_through_install_raises_under_strict() -> None:
+    """reject_span_attributes= takes the same validation path
+    require_span_attributes= does, on every entry point."""
+    provider = TracerProvider()
+
+    with pytest.raises(TypeError, match="reject_span_attributes="):
+        convergent.otel.install(
+            provider,
+            api_key=KEY,
+            endpoint=ENDPOINT,
+            release="r1",
+            reject_span_attributes={"customer.id": object()},
+            strict=True,
+        )
+
+
+def test_a_malformed_reject_through_a_processor_disables_with_strict_off(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Strict off, the processor logs the exact problem at ERROR and sends
+    nothing, the way a malformed require_span_attributes= does."""
+    monkeypatch.delenv("CONVERGENT_STRICT", raising=False)
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = TracerProvider()
+
+    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
+        processor = ConvergentSpanProcessor(
+            api_key=KEY,
+            endpoint=ENDPOINT,
+            release="r1",
+            reject_span_attributes={"customer.id": object()},
+        )
+    provider.add_span_processor(processor)
+    trace.set_tracer_provider(provider)
+
+    with provider.get_tracer("their.framework").start_as_current_span("anything"):
+        pass
+    provider.shutdown()
+
+    assert _names(exporter) == set()
+    assert _core.live_status().enabled is False
+    assert [r for r in caplog.records if "cannot work" in r.message]

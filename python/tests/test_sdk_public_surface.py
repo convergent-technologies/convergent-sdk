@@ -47,6 +47,8 @@ REMOVED = (
     "NoSupportedFrameworkError",
     "NotInitializedError",
     "agent_capability",
+    # Requests are marked with span(context_attributes=...), not a call of its own.
+    "attributes",
     "get_current_span",
     "instrument",
     "span_processor",

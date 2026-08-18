@@ -37,6 +37,8 @@ from opentelemetry.trace import (
     format_trace_id,
 )
 
+from . import _policy, _processors
+
 logger = logging.getLogger("convergent.sdk")
 
 #: The OpenTelemetry GenAI operations, keyed by the name a caller writes. Any
@@ -190,7 +192,7 @@ class SpanHandle:
         return self._ref.permalink if self._ref else None
 
     def set_attribute(self, key: str, value: Any) -> None:
-        if not _accepted(key, value):
+        if not _accepted(key, value, "set_attribute()"):
             return
         if key in _CONVERSATION_ID_INPUT_KEYS:
             for alias in _CONVERSATION_ID_WRITE_KEYS:
@@ -256,6 +258,7 @@ def observe(
     name: str,
     operation: AnyOperation,
     attributes: Mapping[str, str | bool | int | float] | None = None,
+    context_attributes: Mapping[str, str | bool | int | float] | None = None,
 ) -> Callable[[F], F]:
     """Record each call of the decorated function as one span.
 
@@ -265,6 +268,10 @@ def observe(
     list and leaves nothing to compare across traces. The varying part goes in
     ``attributes``.
 
+    ``attributes`` land on this one span. ``context_attributes`` land on this
+    span and every span started while the call runs, library spans included,
+    and stay in the process -- see :func:`span`.
+
     Never raises. A name outside 1-128 characters or an unrecognized operation is
     logged and the span is still recorded -- ingest is where a bad name is
     rejected, because failing there costs the caller nothing while raising here
@@ -273,11 +280,19 @@ def observe(
     _report_invalid(name, operation)
 
     def decorate(function: F) -> F:
+        def opened() -> Any:
+            return span(
+                name=name,
+                operation=operation,
+                attributes=attributes,
+                context_attributes=context_attributes,
+            )
+
         if inspect.isasyncgenfunction(function):
 
             @functools.wraps(function)
             async def async_generator_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with span(name=name, operation=operation, attributes=attributes):
+                with opened():
                     async for item in function(*args, **kwargs):
                         yield item
 
@@ -287,7 +302,7 @@ def observe(
 
             @functools.wraps(function)
             def generator_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with span(name=name, operation=operation, attributes=attributes):
+                with opened():
                     yield from function(*args, **kwargs)
 
             return cast(F, generator_wrapper)
@@ -296,14 +311,14 @@ def observe(
 
             @functools.wraps(function)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with span(name=name, operation=operation, attributes=attributes):
+                with opened():
                     return await function(*args, **kwargs)
 
             return cast(F, async_wrapper)
 
         @functools.wraps(function)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            with span(name=name, operation=operation, attributes=attributes):
+            with opened():
                 return function(*args, **kwargs)
 
         return cast(F, wrapper)
@@ -315,6 +330,7 @@ def agent(
     *,
     name: str,
     attributes: Mapping[str, str | bool | int | float] | None = None,
+    context_attributes: Mapping[str, str | bool | int | float] | None = None,
 ) -> Callable[[F], F]:
     """Record each call of the decorated function as one agent run.
 
@@ -323,13 +339,19 @@ def agent(
     keyword-only on purpose: it is the agent's workspace identity, and deriving
     it from the function name would let a rename in the code rename the agent.
     """
-    return observe(name=name, operation="agent_run", attributes=attributes)
+    return observe(
+        name=name,
+        operation="agent_run",
+        attributes=attributes,
+        context_attributes=context_attributes,
+    )
 
 
 def tool(
     *,
     name: str | None = None,
     attributes: Mapping[str, str | bool | int | float] | None = None,
+    context_attributes: Mapping[str, str | bool | int | float] | None = None,
 ) -> Callable[[F], F]:
     """Record each call of the decorated function as one tool call.
 
@@ -343,7 +365,12 @@ def tool(
 
     def decorate(function: F) -> F:
         tool_name = name if name is not None else getattr(function, "__name__", "")
-        return observe(name=tool_name, operation="tool_call", attributes=attributes)(function)
+        return observe(
+            name=tool_name,
+            operation="tool_call",
+            attributes=attributes,
+            context_attributes=context_attributes,
+        )(function)
 
     return decorate
 
@@ -354,12 +381,26 @@ def span(
     name: str,
     operation: AnyOperation,
     attributes: Mapping[str, str | bool | int | float] | None = None,
+    context_attributes: Mapping[str, str | bool | int | float] | None = None,
 ) -> Iterator[SpanHandle | _NoOpSpanHandle]:
     """Record one span for the body of the ``with`` block.
 
     Same naming rule as :func:`observe`: for ``agent_run``, ``name`` is a stable
     agent identity, never a per-request or per-user string, with the varying part
     in ``attributes``. Never raises, for the same reason :func:`observe` does not.
+
+    ``attributes`` land on this one span. ``context_attributes`` land on this
+    span and every span started inside the block, library spans included: the
+    pairs live in the OpenTelemetry context for exactly the block's lifetime,
+    and a processor stamps each pair onto every span at start as
+    ``convergent.attributes.<key>``, so a stamp overwrites no attribute.
+    Nested blocks merge, and the inner pair wins for a key both set. When one
+    call names a key in both parameters, the span carries both: the bare key
+    from ``attributes`` and the stamped key from ``context_attributes``, and
+    the filter reads the stamped key first. The pairs stay in the process:
+    nothing writes them to outbound requests. A key the SDK owns, or a value
+    that is not a plain ``str``, ``bool``, ``int``, or ``float``, is dropped
+    and logged once, the way an invalid ``attributes`` entry is.
     """
     _report_invalid(name, operation)
     from . import _core
@@ -394,9 +435,18 @@ def span(
         span_attributes.setdefault("gen_ai.tool.type", _DEFAULT_TOOL_TYPE)
         span_name = f"execute_tool {name}"
 
+    context_pairs = (
+        {key: value for key, value in context_attributes.items() if _accepted_context(key, value)}
+        if isinstance(context_attributes, Mapping)
+        else {}
+    )
+
     tracer = state.provider.get_tracer("convergent.sdk", schema_url=_GENAI_SCHEMA_URL)
     open_before = _open_span_count.get()
     _open_span_count.set(open_before + 1)
+    # Attached before the span starts, so the stamper sees the pairs on this
+    # span too, and detached when the block exits, which is the pairs' lifetime.
+    token = _processors.attach_context(context_pairs) if context_pairs else None
     try:
         with tracer.start_as_current_span(
             span_name,
@@ -418,6 +468,8 @@ def span(
         # decrements a count it never incremented, and a negative would then hide a
         # span that really is open.
         _open_span_count.set(max(_open_span_count.get() - 1, 0))
+        if token is not None:
+            _processors.detach_context(token)
 
 
 def _warn_on_split_trace(current: Span, open_before: int) -> None:
@@ -526,20 +578,63 @@ def _trace_ref(target: Span) -> TraceRef | None:
     )
 
 
-def _accepted(key: Any, value: Any) -> bool:
-    if not isinstance(key, str) or key.startswith("convergent.") or key in _RESERVED_ATTRIBUTE_KEYS:
-        _report_once(
-            "reserved_attribute",
-            f"Convergent ignored the attribute {key!r}: it carries identity the SDK "
-            "owns. Use a key of your own instead.",
-        )
+def _accepted(key: Any, value: Any, parameter: str = "attributes=") -> bool:
+    if not _accepted_key(key, parameter):
         return False
     if not _valid_attribute(value):
         _report_once(
-            "invalid_attribute_value",
-            f"Convergent ignored the attribute {key!r}: a span attribute must be a "
-            f"string, bool, int, float, or a flat sequence of those, not "
+            f"invalid_attribute_value:{parameter}",
+            f"Convergent ignored the {parameter} entry {key!r}: a span attribute "
+            f"must be a string, bool, int, float, or a flat sequence of those, not "
             f"{type(value).__name__}.",
+        )
+        return False
+    if isinstance(value, str | bool | int | float) and not _policy._is_attribute_value(value):
+        # A subclass such as a StrEnum or IntEnum member records fine, but the
+        # attribute filter compares by exact type, so no rule can ever match
+        # the recorded value. Recorded anyway, warned once.
+        _report_once(
+            f"subclass_attribute_value:{parameter}",
+            f"Convergent recorded the {parameter} entry {key!r}, whose value "
+            f"subclasses a plain type ({type(value).__name__}). "
+            "require_span_attributes= and reject_span_attributes= match by "
+            "exact type, so no filter rule can match this value. For an enum "
+            "member, pass '.value'.",
+            level=logging.WARNING,
+        )
+    return True
+
+
+def _accepted_context(key: Any, value: Any) -> bool:
+    """Whether one ``context_attributes`` pair may attach.
+
+    The same error path an invalid ``attributes`` entry takes: the pair is
+    dropped and logged once per reason. The value check is stricter, exact
+    plain scalars only, because the filter compares by exact type, so a
+    subclass such as a ``StrEnum`` member would stamp a value no rule could
+    ever match.
+    """
+    if not _accepted_key(key, "context_attributes="):
+        return False
+    if not _policy._is_attribute_value(value):
+        _report_once(
+            "invalid_context_attribute_value",
+            f"Convergent ignored the context_attributes= entry {key!r}: it must be "
+            f"a plain string, bool, int, or float, not {type(value).__name__}. For "
+            "an enum member, pass '.value'.",
+        )
+        return False
+    return True
+
+
+def _accepted_key(key: Any, parameter: str) -> bool:
+    # The report key varies by parameter, and there are three parameters, so
+    # the _report_once bound holds.
+    if not isinstance(key, str) or key.startswith("convergent.") or key in _RESERVED_ATTRIBUTE_KEYS:
+        _report_once(
+            f"reserved_attribute:{parameter}",
+            f"Convergent ignored the {parameter} key {key!r}: it carries identity "
+            "the SDK owns. Use a key of your own instead.",
         )
         return False
     return True

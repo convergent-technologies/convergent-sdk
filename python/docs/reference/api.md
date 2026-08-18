@@ -7,7 +7,7 @@ Everything here is reachable as `convergent.<name>` after `import convergent`.
 `init()`, `otel.install()`, and `ConvergentSpanProcessor` reject a setting that
 cannot work: logged at ERROR and disabled by default, raised at startup when
 `strict=True` or `CONVERGENT_STRICT=1` is set. `File` and `Console` check their
-own literal arguments and raise at construction. Nothing raises after setup.
+own literal arguments and raise at construction. After setup, nothing raises.
 
 There are no Convergent exception types. A value of the wrong type raises
 `TypeError`, a value of the right type that is not allowed raises `ValueError`, and
@@ -25,8 +25,9 @@ The installed package's version string, `"0.0.0"` in a source checkout with no
 
 ```python
 convergent.init(*, api_key=None, endpoint=None, release=None, agents=None,
-                destinations=(), tracer_provider=None, debug=False,
-                strict=False) -> Status
+                require_span_attributes=None, reject_span_attributes=None,
+                destinations=(), tracer_provider=None,
+                debug=False, strict=False) -> Status
 ```
 
 Configures tracing for the process and returns what was configured. Call it once
@@ -38,6 +39,8 @@ at startup.
 | `endpoint` | `CONVERGENT_ENDPOINT` | `https://ingest.convergent.dev` |
 | `release` | `CONVERGENT_RELEASE` | none |
 | `agents` | | send every span |
+| `require_span_attributes` | `CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` | send every span |
+| `reject_span_attributes` | `CONVERGENT_REJECT_SPAN_ATTRIBUTES` | send every span |
 | `destinations` | `CONVERGENT_SPANS_DIR` | none |
 | `tracer_provider` | | the global provider |
 | `debug` | `CONVERGENT_DEBUG` | `False` |
@@ -48,11 +51,50 @@ file destination, the configuration is rejected. A release is required too. Any
 string naming the version works: a git sha, a build id, a date.
 
 `agents` is the list of agent names Convergent is allowed to see. Name them and
-we get those agents' spans and everything inside their runs. Leave it out and
-every span the process records is sent.
+we get those agents' spans and everything inside their runs. If you set none of
+`agents`, `require_span_attributes`, and `reject_span_attributes`, every span
+the process records is sent.
 
-`destinations` adds places on top of Convergent, and every span goes to all of
-them.
+`require_span_attributes` maps attribute names to the values a span must hold
+to be sent, e.g. `require_span_attributes={"customer.id": ["acme", "globex"]}`.
+`reject_span_attributes` maps attribute names to the values that withhold a
+span, e.g. `reject_span_attributes={"customer.id": ["internal-test"]}`. Each
+maps a key to one value or a list of values. A key's listed values combine with
+OR. `require_span_attributes` keys combine with AND: every named key must
+match. `reject_span_attributes` keys combine with OR: one matching key
+withholds the span. `reject_span_attributes` decides first, so a pair named in
+both mappings is withheld. `init()` logs an ERROR for such a pair at startup.
+The two environment variables fill the arguments in when they are absent, and
+each holds the same mapping as JSON, e.g. `'{"customer.id": ["acme"]}'`.
+
+Three ways hold a key. Pass [`context_attributes=`](#span) on `span()` or a
+decorator. The SDK stamps each pair onto that span and every span started
+inside it, as `convergent.attributes.<key>`. The pairs stay in the process;
+nothing writes them to outbound requests. The span's own attributes satisfy
+the key per span, read when the span ends. Resource attributes satisfy it per
+process, `OTEL_RESOURCE_ATTRIBUTES` included. The stamped mark answers first,
+then the span's own attribute, then the resource. Your own exporters receive
+the stamp. Past the attribute limit, OpenTelemetry evicts the span's oldest
+attribute. A span that loses a stamped key that way is withheld under
+`require_span_attributes`.
+
+Under `require_span_attributes`, a span that holds the key in no source is not
+sent. Under `reject_span_attributes` alone, an unmarked span is sent. An
+unmarked span never passes `require_span_attributes`. Comparison is exact, by
+type and case: `1` matches neither `"1"` nor `True`, and `"Acme"` does not
+match `"acme"`. A list-valued or enum-valued span attribute never matches, so
+`reject_span_attributes` cannot exclude it and `require_span_attributes`
+withholds it. `require_span_attributes={"customer.id": []}` matches nothing and
+sends no span at all. `reject_span_attributes={"customer.id": []}` withholds
+nothing. The filters and `agents` combine: a span is sent only when every
+configured filter keeps it.
+
+The filters cover one process. Set the mark and the filters in each service.
+Nothing about them travels between processes. A service with no filters sends
+everything it records.
+
+`destinations` adds places on top of Convergent, and every span the filters
+keep goes to all of them.
 
 ```python
 convergent.init(release="1.4.0", destinations=[convergent.File("/data/traces"), convergent.Console()])
@@ -121,11 +163,15 @@ registered but no agent has ever been linked to it.
 ## observe()
 
 ```python
-convergent.observe(*, name, operation, attributes=None) -> Callable
+convergent.observe(*, name, operation, attributes=None, context_attributes=None) -> Callable
 ```
 
 Records each call of the decorated function as one span. Works on plain
 functions, coroutines, generators, and async generators.
+
+`attributes` land on that one span. `context_attributes` land on that span and
+on every span started while the call runs. [span()](#span) states the full
+rules for both.
 
 A generator's span covers the whole iteration, and abandoning one early is not
 recorded as an error. A traced generator nobody exhausted still has its span open
@@ -143,7 +189,7 @@ decorated function records its own input and output.
 ## agent()
 
 ```python
-convergent.agent(*, name, attributes=None) -> Callable
+convergent.agent(*, name, attributes=None, context_attributes=None) -> Callable
 ```
 
 `observe(name=name, operation="agent_run")`, spelled for the common case.
@@ -161,7 +207,7 @@ code rename the agent.
 ## tool()
 
 ```python
-convergent.tool(*, name=None, attributes=None) -> Callable
+convergent.tool(*, name=None, attributes=None, context_attributes=None) -> Callable
 ```
 
 `observe(operation="tool_call")`, spelled for the common case. Leave `name` out
@@ -178,7 +224,7 @@ The bare `@convergent.tool` form is not supported.
 ## span()
 
 ```python
-convergent.span(*, name, operation, attributes=None) -> Iterator
+convergent.span(*, name, operation, attributes=None, context_attributes=None) -> Iterator
 ```
 
 Records one span for the body of a `with` block and yields a
@@ -188,6 +234,25 @@ Records one span for the body of a `with` block and yields a
 with convergent.span(name="answer", operation="model_call") as handle:
     handle.set_input(prompt)
 ```
+
+`attributes` land on that one span. `context_attributes` land on that span and
+on every span started inside the block, library spans included. The pairs live
+in the OpenTelemetry context for exactly the block's lifetime. The SDK stamps
+each pair onto every span at start as `convergent.attributes.<key>`, so a
+stamp overwrites no attribute. Nested blocks merge their pairs, and the inner
+value wins for a key both set. When one call names a key in both parameters,
+the span carries both: the bare key from `attributes` and the stamped key from
+`context_attributes`, and the filter reads the stamped key first. The pairs
+stay in the process: nothing writes them to outbound requests. This is how a
+request is marked for the
+[`require_span_attributes=` and `reject_span_attributes=` filters](#init).
+
+The pairs follow an `asyncio` task. A raw thread starts with an empty context,
+so pass `contextvars.copy_context()` to reach a worker thread.
+
+Both parameters take plain `str`, `bool`, `int`, or `float` values. A key the
+SDK owns, or a `context_attributes` value of any other type, is dropped and
+logged once.
 
 An exception leaving the block sets the span status to error and re-raises.
 `GeneratorExit` and `asyncio.CancelledError` pass through untouched.
@@ -367,7 +432,8 @@ its own arguments and raises where you wrote it, whatever `strict` is set to.
 convergent.init(release="1.4.0", destinations=[convergent.File("/data/traces", mode=0o640)])
 ```
 
-Writes every span to `<path>/<filename>` as OTLP/JSON, one span per line.
+Writes every span the filters keep to `<path>/<filename>` as OTLP/JSON, one
+span per line.
 
 | Field | Type | Allowed values | Meaning |
 | --- | --- | --- | --- |
@@ -407,7 +473,7 @@ strict mode.
 convergent.init(release="1.4.0", destinations=[convergent.Console(pretty=True)])
 ```
 
-Writes every span to stdout or stderr as OTLP/JSON.
+Writes every span the filters keep to stdout or stderr as OTLP/JSON.
 
 | Field | Type | Allowed values | Meaning |
 | --- | --- | --- | --- |
@@ -444,21 +510,25 @@ Returned by `init()`.
 | `app_url` | `str \| None` | — | where this deployment is in the workspace. `None` today, because nothing fills it in yet |
 | `reason` | `str \| None` | `None`, `"missing_config"`, `"invalid_config"`, `"setup_failed"`, `"no_provider"`, `"already_configured"` | `None`, or why part of the setup is not working |
 
-`agents` reports registration with the server. The
-[agent filter](../opentelemetry.md#agent-filter) enforces the list this process
-declared, so a name the server declined still has its spans sent.
+`agents` reports registration with the server. The filter described in
+[Filtering what is sent](../opentelemetry.md#filtering-what-is-sent) enforces
+the list this process declared, so a name the server declined still has its
+spans sent.
 
 ## otel.install()
 
 ```python
 convergent.otel.install(provider, *, api_key=None, endpoint=None, release=None,
-                        agents=None, strict=False) -> ConvergentSpanProcessor
+                        agents=None, require_span_attributes=None, reject_span_attributes=None,
+                        strict=False) -> ConvergentSpanProcessor
 ```
 
 Adds Convergent to a provider you built, with no `init()` call. Handing the
 provider over is what makes `span()` and `observe()` record through it.
 
-Each argument falls back to the same environment variable `init()` reads.
+`api_key`, `endpoint`, `release`, `require_span_attributes`,
+`reject_span_attributes`, and `strict` fall back to the same environment
+variables `init()` reads; `agents` has none.
 `destinations` is not accepted, so this route needs an API key.
 `CONVERGENT_SPANS_DIR` is read by `init()` only.
 

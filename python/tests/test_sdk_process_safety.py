@@ -175,7 +175,7 @@ def test_exit_drain_shares_one_budget_across_processors(
 
         def shutdown(self) -> None: ...
 
-    monkeypatch.setattr(_core, "_processors", [_Slow(), _Slow(), _Slow()])
+    monkeypatch.setattr(_core, "_drain", [_Slow(), _Slow(), _Slow()])
 
     _core._drain_all_processors()
 
@@ -203,7 +203,7 @@ def test_exit_drain_still_shuts_every_processor_down_after_the_budget(
         def shutdown(self) -> None:
             shutdowns.append(self._index)
 
-    monkeypatch.setattr(_core, "_processors", [_Recorder(0), _Recorder(1), _Recorder(2)])
+    monkeypatch.setattr(_core, "_drain", [_Recorder(0), _Recorder(1), _Recorder(2)])
 
     _core._drain_all_processors()
 

@@ -37,6 +37,14 @@ root logger or a level of their own on an `opentelemetry` logger.
 
 Work down this list.
 
+### The require_span_attributes= or reject_span_attributes= filter withheld them
+
+If `init(require_span_attributes=...)` is set, confirm the running requests are marked with
+`context_attributes=`. `require_span_attributes={"k": []}` sends nothing at all. If
+`init(reject_span_attributes=...)` is set, confirm the running requests do not carry a
+rejected pair. See
+[Spans are missing under require_span_attributes= or reject_span_attributes=](#spans-are-missing-under-require_span_attributes-or-reject_span_attributes).
+
 ### Nothing was configured
 
 `init()` rejects a configuration with no key and no destination, or with no
@@ -204,6 +212,48 @@ in the `init()` call against the `gen_ai.agent.name` each span carries.
 
 An agent run that never names itself is also dropped, because a span with no
 parent is kept only by name.
+
+## Spans are missing under require_span_attributes= or reject_span_attributes=
+
+The filters withhold a span inside your process, and per span they log
+nothing. Eight causes look the same from outside.
+
+The value does not match exactly. Comparison is by type and case: `1` matches
+neither `"1"` nor `True`, and `"Acme"` does not match `"acme"`. A float in
+`require_span_attributes=` or `reject_span_attributes=` warns at startup with `may never match`, because an
+exact comparison against a recorded float rarely holds.
+
+The span's attribute holds a list or an enum member. Such a value never
+matches, so `reject_span_attributes=` cannot exclude the span and `require_span_attributes=` withholds it.
+Record the plain scalar instead: `.value` for an enum member.
+
+No source held a required key when the span ended. The decision reads the
+stamped `convergent.attributes.<key>` mark first, then the finished span's own
+attributes, then the resource attributes. Mark the request with
+`context_attributes=` on the `span()` call that wraps it, write the attribute
+onto the span, or set it on the resource.
+
+The span was started from an explicitly passed `Context`, which misses the
+mark: the mark is read from that context, not from the ambient one, and it
+ends with the marked block. A resource or span attribute can still answer.
+
+The request crossed to a second process without its mark. The
+`context_attributes=` pairs stay in the process that set them, so the second
+service withholds its spans until it marks its own requests and sets its own
+filters.
+
+A span carried a rejected pair. `reject_span_attributes=` withholds on any one matching key,
+and it wins over `require_span_attributes=` for a pair named in both. A contradicting pair is
+logged at ERROR at startup with `reject_span_attributes= wins`.
+
+The span outgrew its attribute limit. Past the limit, 128 by default,
+OpenTelemetry evicts the span's oldest attribute, and the stamped key is
+among the oldest, so the span loses it and is withheld under `require_span_attributes=`. The
+span's `dropped_attributes` count is above zero then. Raise
+`OTEL_ATTRIBUTE_COUNT_LIMIT`, or record fewer attributes on one span.
+
+The decision itself failed. An exception while deciding withholds the span and
+logs `Convergent could not decide whether a span may be sent` once per process.
 
 ## Too many agents are listed
 
