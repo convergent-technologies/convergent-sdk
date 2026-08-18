@@ -12,9 +12,12 @@ Keep the user's application structure intact.
 ## Use current docs
 
 SDK and integration APIs change.
+If the project does not pin `convergent-sdk`, install the latest release.
+If the project pins an older `convergent-sdk`, tell the user before you rely on newer docs.
 Read [references/python.md](references/python.md) before changing code.
 Read only the sections that match the target agent.
-When internet access exists, read the matching current SDK page.
+When internet access exists, read the current docs first:
+fetch <https://app.convergent.dev/docs/llms.txt> and follow the matching page.
 Inspect the installed package version and source before using an API.
 Use installed code for exact imports and signatures.
 Do not invent an SDK API.

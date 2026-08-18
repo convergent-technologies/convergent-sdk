@@ -55,43 +55,52 @@ we get those agents' spans and everything inside their runs. If you set none of
 `agents`, `require_span_attributes`, and `reject_span_attributes`, every span
 the process records is sent.
 
-`require_span_attributes` maps attribute names to the values a span must hold
-to be sent, e.g. `require_span_attributes={"customer.id": ["acme", "globex"]}`.
-`reject_span_attributes` maps attribute names to the values that withhold a
-span, e.g. `reject_span_attributes={"customer.id": ["internal-test"]}`. Each
-maps a key to one value or a list of values. A key's listed values combine with
-OR. `require_span_attributes` keys combine with AND: every named key must
-match. `reject_span_attributes` keys combine with OR: one matching key
-withholds the span. `reject_span_attributes` decides first, so a pair named in
-both mappings is withheld. `init()` logs an ERROR for such a pair at startup.
-The two environment variables fill the arguments in when they are absent, and
-each holds the same mapping as JSON, e.g. `'{"customer.id": ["acme"]}'`.
+`require_span_attributes` and `reject_span_attributes` filter by attribute
+value:
 
-Three ways hold a key. Pass [`context_attributes=`](#span) on `span()` or a
-decorator. The SDK stamps each pair onto that span and every span started
-inside it, as `convergent.attributes.<key>`. The pairs stay in the process;
-nothing writes them to outbound requests. The span's own attributes satisfy
-the key per span, read when the span ends. Resource attributes satisfy it per
-process, `OTEL_RESOURCE_ATTRIBUTES` included. The stamped mark answers first,
-then the span's own attribute, then the resource. Your own exporters receive
-the stamp. Past the attribute limit, OpenTelemetry evicts the span's oldest
-attribute. A span that loses a stamped key that way is withheld under
-`require_span_attributes`.
+- `require_span_attributes={"customer.id": ["acme", "globex"]}` sends a span
+  only when every named key holds an allowed value.
+- `reject_span_attributes={"customer.id": ["internal-test"]}` withholds a span
+  when any named key holds a listed value.
+- A key takes one value or a list. Listed values combine with OR.
+- `require_span_attributes` keys combine with AND.
+  `reject_span_attributes` keys combine with OR.
+- Reject decides first. A pair named in both mappings is withheld, and
+  `init()` logs an ERROR for it at startup.
+- Each environment variable holds the same mapping as JSON, e.g.
+  `'{"customer.id": ["acme"]}'`, and fills the argument in when it is absent.
 
-Under `require_span_attributes`, a span that holds the key in no source is not
-sent. Under `reject_span_attributes` alone, an unmarked span is sent. An
-unmarked span never passes `require_span_attributes`. Comparison is exact, by
-type and case: `1` matches neither `"1"` nor `True`, and `"Acme"` does not
-match `"acme"`. A list-valued or enum-valued span attribute never matches, so
-`reject_span_attributes` cannot exclude it and `require_span_attributes`
-withholds it. `require_span_attributes={"customer.id": []}` matches nothing and
-sends no span at all. `reject_span_attributes={"customer.id": []}` withholds
-nothing. The filters and `agents` combine: a span is sent only when every
-configured filter keeps it.
+Three ways hold a key:
 
-The filters cover one process. Set the mark and the filters in each service.
-Nothing about them travels between processes. A service with no filters sends
-everything it records.
+1. Pass [`context_attributes=`](#span) on `span()` or a decorator. The SDK
+   stamps each pair onto that span and every span started inside it, as
+   `convergent.attributes.<key>`. The pairs stay in the process; nothing
+   writes them to outbound requests.
+2. The span's own attributes, read when the span ends.
+3. Resource attributes, `OTEL_RESOURCE_ATTRIBUTES` included, once per process.
+
+The stamped mark answers first, then the span's own attribute, then the
+resource. Your own exporters receive the stamp.
+
+The matching rules:
+
+- Comparison is exact, by type and case. `1` matches neither `"1"` nor
+  `True`. `"Acme"` does not match `"acme"`.
+- An unmarked span never passes `require_span_attributes`. Under
+  `reject_span_attributes` alone, an unmarked span is sent.
+- A list-valued or enum-valued span attribute never matches.
+  `reject_span_attributes` cannot exclude it. `require_span_attributes`
+  withholds it.
+- `require_span_attributes={"customer.id": []}` sends no span at all.
+  `reject_span_attributes={"customer.id": []}` withholds nothing.
+- Past the attribute limit, OpenTelemetry evicts the span's oldest attribute.
+  A span that loses a stamped key that way is withheld under
+  `require_span_attributes`.
+- The filters and `agents` combine. A span is sent only when every configured
+  filter keeps it.
+- The filters cover one process. Set the mark and the filters in each
+  service. Nothing about them travels between processes. A service with no
+  filters sends everything it records.
 
 `destinations` adds places on top of Convergent, and every span the filters
 keep goes to all of them.

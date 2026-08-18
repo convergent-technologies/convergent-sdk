@@ -13,6 +13,11 @@ It works toward an expected recording.
 It reports evidence-backed findings.
 It changes no code.
 
+The skill tells the agent to work from current sources: it installs the latest
+`convergent-sdk` when the project does not pin one, and it reads the live docs
+through [llms.txt](https://app.convergent.dev/docs/llms.txt) before it edits
+code.
+
 ## Install the skills
 
 Use the Skills CLI to install both skills for your coding agent:
@@ -26,8 +31,8 @@ Select `convergent-instrument` and `convergent-verify` when prompted.
 You can also copy each directory from `skills/` into your agent's skills directory.
 Keep both directory names unchanged.
 
-The [SDK README](../README.md#instrument-with-a-coding-agent) has prompts for new and
-existing setups.
+The [SDK README](https://github.com/convergent-technologies/convergent-sdk#instrument-with-a-coding-agent)
+has prompts for new and existing setups.
 
 ## Instrument one agent
 

@@ -3,8 +3,8 @@
   "root": true,
   "pages": [
     "index",
-    "instrument",
     "agent-skill",
+    "instrument",
     "integrations",
     "opentelemetry",
     "---Reference---",
