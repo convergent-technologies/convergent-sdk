@@ -32,6 +32,9 @@ EXPECTED = [
     "current_span",
     "TraceRef",
     "SpanHandle",
+    # The union context_attributes= accepts on the decorators: the pairs, or a
+    # callable resolved from the decorated function's own arguments per call.
+    "ContextAttributes",
     "Report",
     "Note",
 ]

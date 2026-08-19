@@ -16,6 +16,7 @@ from ._check import Note, Report, check
 from ._core import FlushResult, Status, flush, init, tracer_provider
 from ._destinations import Console, Destination, File
 from ._semantic import (
+    ContextAttributes,
     SpanHandle,
     TraceRef,
     agent,
@@ -52,6 +53,7 @@ __all__ = [
     "current_span",
     "TraceRef",
     "SpanHandle",
+    "ContextAttributes",
     "Report",
     "Note",
 ]

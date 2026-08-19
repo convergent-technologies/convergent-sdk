@@ -4,6 +4,21 @@ Each released version has a `## <version>` section here, and the release
 workflow publishes that section as the GitHub Release notes. The newest
 section may describe a version whose tag does not exist yet.
 
+## 0.0.8
+
+- `context_attributes=` on `agent()`, `tool()`, and `observe()` also takes a
+  callable. The SDK calls it on every call, with the decorated function's
+  arguments bound to their parameter names, so a per-request value such as a
+  customer id can tag the run. When the callable raises or returns something
+  that is not a mapping, the SDK logs once, records the span for your own
+  destinations, and withholds it when `require_span_attributes=` or
+  `reject_span_attributes=` is configured. An untagged span must not slip past
+  a filter.
+- `set_context_attributes(pairs)` on the span handle marks the running span
+  and every span started after the call inside it. Use it for a value you only
+  know mid-request. The handle must be on a span the SDK opened. On any other
+  span the call is refused and logged.
+
 ## 0.0.7
 
 - Every span now inherits its parent span's `context_attributes=` pairs. A

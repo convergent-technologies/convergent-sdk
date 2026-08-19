@@ -24,6 +24,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Literal, TypeVar, cast
 
 from opentelemetry import context, trace
@@ -63,6 +64,21 @@ Operation = Literal[
 #: annotating a parameter :data:`Operation` is how a caller opts into the stricter
 #: check.
 AnyOperation = Operation | str
+
+#: Returned by a context resolver when the pairs could not be worked out.
+#: ``span()`` reads it as "withhold under any filter", never as "no pairs".
+_RESOLUTION_FAILED: Mapping[str, Any] = MappingProxyType({})
+
+#: What the decorators accept for ``context_attributes=``: the pairs
+#: themselves, or a callable resolved on every call from the decorated
+#: function's arguments, bound to their parameter names.
+ContextAttributes = (
+    Mapping[str, str | bool | int | float] | Callable[..., Mapping[str, str | bool | int | float]]
+)
+
+#: The tracer name every span the SDK opens carries in its instrumentation
+#: scope. ``set_context_attributes`` recognizes the SDK's own spans by it.
+_TRACER_NAME = "convergent.sdk"
 
 _OPERATIONS: dict[str, str] = {
     "agent_run": "invoke_agent",
@@ -200,6 +216,56 @@ class SpanHandle:
             return
         self._span.set_attribute(key, value)
 
+    def set_context_attributes(self, attributes: Mapping[str, str | bool | int | float]) -> None:
+        """Mark this span and every span started after this call inside it.
+
+        Use it for a value you only know mid-request, such as a customer id
+        looked up from a token. Spans started before this call keep what they
+        had. Call it inside the span it marks, on the thread the span runs on.
+        The span must be one the SDK opened. On any other span the call is
+        refused and logged, because nothing releases the pairs when that span
+        ends. Each pair passes the same guards as ``context_attributes=``.
+        When no usable pair remains, any span filter withholds the span.
+        Never raises.
+        """
+        scope = getattr(self._span, "instrumentation_scope", None)
+        if scope is None or scope.name != _TRACER_NAME:
+            _report_once(
+                "set_context_attributes_foreign_span",
+                "Convergent ignored set_context_attributes(): this is not a span "
+                "Convergent opened, so nothing releases the pairs when it ends. "
+                "Call it on the run's own handle, or open a span() here.",
+            )
+            return
+        if trace.get_current_span() is not self._span or not self._span.is_recording():
+            _report_once(
+                "set_context_attributes_off_span",
+                "Convergent ignored set_context_attributes(): the handle's span "
+                "is not the one running here. Call it inside the span it marks, "
+                "on the thread that span is running on.",
+            )
+            return
+        pairs: dict[str, Any] = {}
+        if isinstance(attributes, Mapping):
+            pairs = {
+                key: value
+                for key, value in attributes.items()
+                if _accepted_context(key, value, "set_context_attributes()")
+            }
+            if attributes and not pairs:
+                pairs = {_processors.UNRESOLVED: True}
+        else:
+            _report_once(
+                "set_context_attributes_not_mapping",
+                f"Convergent could not use set_context_attributes(): it takes a "
+                f"mapping of pairs, not {type(attributes).__name__}. The span is "
+                "recorded for your own destinations and withheld under any span "
+                "filter.",
+            )
+            pairs = {_processors.UNRESOLVED: True}
+        if pairs:
+            _processors.mark_span(self._span, pairs)
+
     def set_input(self, value: Any) -> None:
         if self._operation == _TOOL_OPERATION:
             self._span.set_attribute("gen_ai.tool.call.arguments", _text(value))
@@ -243,6 +309,9 @@ class _NoOpSpanHandle:
     def set_attribute(self, key: str, value: Any) -> None:
         pass
 
+    def set_context_attributes(self, attributes: Mapping[str, str | bool | int | float]) -> None:
+        pass
+
     def set_input(self, value: Any) -> None:
         pass
 
@@ -258,7 +327,7 @@ def observe(
     name: str,
     operation: AnyOperation,
     attributes: Mapping[str, str | bool | int | float] | None = None,
-    context_attributes: Mapping[str, str | bool | int | float] | None = None,
+    context_attributes: ContextAttributes | None = None,
 ) -> Callable[[F], F]:
     """Record each call of the decorated function as one span.
 
@@ -272,6 +341,12 @@ def observe(
     span and every span started while the call runs, library spans included,
     and stay in the process -- see :func:`span`.
 
+    ``context_attributes`` may also be a callable. It is called once per call,
+    with the decorated function's own arguments, and the mapping it returns
+    attaches to this span and to every span started while the call runs. A
+    callable that raises, or that returns something that is not a Mapping, is
+    logged once and the span is recorded with no context pairs.
+
     Never raises. A name outside 1-128 characters or an unrecognized operation is
     logged and the span is still recorded -- ingest is where a bad name is
     rejected, because failing there costs the caller nothing while raising here
@@ -280,19 +355,28 @@ def observe(
     _report_invalid(name, operation)
 
     def decorate(function: F) -> F:
-        def opened() -> Any:
+        resolve = _context_resolver(context_attributes, function)
+
+        def opened(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            resolved = context_attributes
+            if resolve is not None:
+                from . import _core
+
+                # Resolved only when a provider exists: with tracing off, the
+                # caller's callable must not run at all.
+                resolved = resolve(args, kwargs) if _core.snapshot().provider is not None else None
             return span(
                 name=name,
                 operation=operation,
                 attributes=attributes,
-                context_attributes=context_attributes,
+                context_attributes=resolved,
             )
 
         if inspect.isasyncgenfunction(function):
 
             @functools.wraps(function)
             async def async_generator_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with opened():
+                with opened(args, kwargs):
                     async for item in function(*args, **kwargs):
                         yield item
 
@@ -302,7 +386,7 @@ def observe(
 
             @functools.wraps(function)
             def generator_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with opened():
+                with opened(args, kwargs):
                     yield from function(*args, **kwargs)
 
             return cast(F, generator_wrapper)
@@ -311,14 +395,14 @@ def observe(
 
             @functools.wraps(function)
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                with opened():
+                with opened(args, kwargs):
                     return await function(*args, **kwargs)
 
             return cast(F, async_wrapper)
 
         @functools.wraps(function)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
-            with opened():
+            with opened(args, kwargs):
                 return function(*args, **kwargs)
 
         return cast(F, wrapper)
@@ -326,11 +410,87 @@ def observe(
     return decorate
 
 
+def _context_resolver(
+    context_attributes: ContextAttributes | None,
+    function: Callable[..., Any],
+) -> Callable[[tuple[Any, ...], dict[str, Any]], Mapping[str, Any]] | None:
+    """A per-call resolver for a callable ``context_attributes``, else ``None``.
+
+    Built once at decoration, so the mapping form pays nothing and the
+    signature is read one time. The resolver binds each call's arguments to
+    the decorated function's parameter names and hands the callable keywords,
+    so ``lambda customer_id, **_:`` names the parameter it wants wherever the
+    caller put it. Never raises: every failure is reported once and resolves
+    to :data:`_RESOLUTION_FAILED`, which withholds the span under any filter.
+    """
+    if isinstance(context_attributes, Mapping) or not callable(context_attributes):
+        return None
+    try:
+        signature = inspect.signature(function)
+    except (TypeError, ValueError):
+
+        def unresolvable(*_: object) -> Mapping[str, Any]:
+            _report_once(
+                "context_attributes_no_signature",
+                "Convergent could not read the decorated function's signature to "
+                "resolve context_attributes=. The span is recorded for your own "
+                "destinations and withheld under any span filter.",
+            )
+            return _RESOLUTION_FAILED
+
+        return unresolvable
+
+    def resolve(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Mapping[str, Any]:
+        try:
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+        except TypeError:
+            _report_once(
+                "context_attributes_bind_failed",
+                "Convergent could not bind the call's arguments to the decorated "
+                "function's parameters to resolve context_attributes=. The span "
+                "is recorded for your own destinations and withheld under any "
+                "span filter.",
+            )
+            return _RESOLUTION_FAILED
+        try:
+            resolved = context_attributes(**bound.arguments)
+        except Exception as error:
+            _report_once(
+                "context_attributes_callable_raised",
+                f"Convergent could not resolve the context_attributes= callable: "
+                f"it raised {type(error).__name__}. The span is recorded for your "
+                "own destinations and withheld under any span filter.",
+            )
+            return _RESOLUTION_FAILED
+        if not isinstance(resolved, Mapping):
+            _report_once(
+                "context_attributes_callable_result",
+                f"Convergent could not use the context_attributes= callable's "
+                f"result: it must be a Mapping, not {type(resolved).__name__}. "
+                "The span is recorded for your own destinations and withheld "
+                "under any span filter.",
+            )
+            return _RESOLUTION_FAILED
+        usable = {key: value for key, value in resolved.items() if _accepted_context(key, value)}
+        if resolved and not usable:
+            _report_once(
+                "context_attributes_callable_unusable",
+                "Convergent could not use any pair the context_attributes= "
+                "callable returned. The span is recorded for your own "
+                "destinations and withheld under any span filter.",
+            )
+            return _RESOLUTION_FAILED
+        return usable
+
+    return resolve
+
+
 def agent(
     *,
     name: str,
     attributes: Mapping[str, str | bool | int | float] | None = None,
-    context_attributes: Mapping[str, str | bool | int | float] | None = None,
+    context_attributes: ContextAttributes | None = None,
 ) -> Callable[[F], F]:
     """Record each call of the decorated function as one agent run.
 
@@ -351,7 +511,7 @@ def tool(
     *,
     name: str | None = None,
     attributes: Mapping[str, str | bool | int | float] | None = None,
-    context_attributes: Mapping[str, str | bool | int | float] | None = None,
+    context_attributes: ContextAttributes | None = None,
 ) -> Callable[[F], F]:
     """Record each call of the decorated function as one tool call.
 
@@ -381,7 +541,7 @@ def span(
     name: str,
     operation: AnyOperation,
     attributes: Mapping[str, str | bool | int | float] | None = None,
-    context_attributes: Mapping[str, str | bool | int | float] | None = None,
+    context_attributes: ContextAttributes | None = None,
 ) -> Iterator[SpanHandle | _NoOpSpanHandle]:
     """Record one span for the body of the ``with`` block.
 
@@ -435,13 +595,26 @@ def span(
         span_attributes.setdefault("gen_ai.tool.type", _DEFAULT_TOOL_TYPE)
         span_name = f"execute_tool {name}"
 
-    context_pairs = (
-        {key: value for key, value in context_attributes.items() if _accepted_context(key, value)}
-        if isinstance(context_attributes, Mapping)
-        else {}
-    )
+    context_pairs: dict[str, Any] = {}
+    # Checked before the Mapping branch: the sentinel is itself a Mapping.
+    if context_attributes is _RESOLUTION_FAILED:
+        context_pairs = {_processors.UNRESOLVED: True}
+    elif isinstance(context_attributes, Mapping):
+        context_pairs = {
+            key: value for key, value in context_attributes.items() if _accepted_context(key, value)
+        }
+    elif context_attributes is not None:
+        _report_once(
+            "span_context_attributes_not_mapping",
+            f"Convergent could not use span()'s context_attributes=: it must be a "
+            f"mapping of pairs, not {type(context_attributes).__name__}. A "
+            "callable belongs on a decorator, which has call arguments to hand "
+            "it. The span is recorded for your own destinations and withheld "
+            "under any span filter.",
+        )
+        context_pairs = {_processors.UNRESOLVED: True}
 
-    tracer = state.provider.get_tracer("convergent.sdk", schema_url=_GENAI_SCHEMA_URL)
+    tracer = state.provider.get_tracer(_TRACER_NAME, schema_url=_GENAI_SCHEMA_URL)
     open_before = _open_span_count.get()
     _open_span_count.set(open_before + 1)
     # Attached before the span starts, so the stamper sees the pairs on this
@@ -463,6 +636,8 @@ def span(
             except BaseException as error:
                 current.set_status(Status(StatusCode.ERROR, type(error).__name__))
                 raise
+            finally:
+                _processors.release_marks(current)
     finally:
         # Clamped because a generator started in one context and closed in another
         # decrements a count it never incremented, and a negative would then hide a
@@ -540,8 +715,9 @@ def current_span() -> SpanHandle | _NoOpSpanHandle:
 
     This is how a function decorated with :func:`observe`, :func:`agent`, or
     :func:`tool` records content on its own span, since the decorator yields no
-    handle. The handle carries the same guards as the one :func:`span` yields:
-    a reserved attribute key is dropped and logged.
+    handle. The handle drops and logs a reserved attribute key, the way the one
+    :func:`span` yields does. ``set_context_attributes`` works only on a span
+    the SDK opened, so on a framework's span it is refused and logged.
 
     The innermost active span is whatever the ambient OpenTelemetry context
     holds, so it may be a framework's span rather than one this SDK opened, and
@@ -605,7 +781,7 @@ def _accepted(key: Any, value: Any, parameter: str = "attributes=") -> bool:
     return True
 
 
-def _accepted_context(key: Any, value: Any) -> bool:
+def _accepted_context(key: Any, value: Any, parameter: str = "context_attributes=") -> bool:
     """Whether one ``context_attributes`` pair may attach.
 
     The same error path an invalid ``attributes`` entry takes: the pair is
@@ -614,12 +790,12 @@ def _accepted_context(key: Any, value: Any) -> bool:
     subclass such as a ``StrEnum`` member would stamp a value no rule could
     ever match.
     """
-    if not _accepted_key(key, "context_attributes="):
+    if not _accepted_key(key, parameter):
         return False
     if not _policy._is_attribute_value(value):
         _report_once(
             "invalid_context_attribute_value",
-            f"Convergent ignored the context_attributes= entry {key!r}: it must be "
+            f"Convergent ignored the {parameter} entry {key!r}: it must be "
             f"a plain string, bool, int, or float, not {type(value).__name__}. For "
             "an enum member, pass '.value'.",
         )
@@ -833,6 +1009,7 @@ class SemanticSpanProcessor(SpanProcessor):
 
 
 __all__ = [
+    "ContextAttributes",
     "Operation",
     "SemanticSpanProcessor",
     "SpanHandle",

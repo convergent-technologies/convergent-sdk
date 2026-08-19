@@ -7,12 +7,14 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
+import inspect
 import logging
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Generator, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 from opentelemetry import baggage as otel_baggage
@@ -552,6 +554,207 @@ def test_every_entry_point_marks_the_request_and_its_library_children(
     entry(tracer, None, child("unmarked child"))
 
     assert _names(exporter) == {own_span, "acme child"}
+
+
+# --- a callable resolves the context pairs per call -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("decorate", "own_span"),
+    [
+        pytest.param(
+            functools.partial(convergent.observe, operation="workflow"),
+            "agent",
+            id="@observe(context_attributes=callable)",
+        ),
+        pytest.param(convergent.agent, "invoke_agent agent", id="@agent"),
+        pytest.param(convergent.tool, "execute_tool agent", id="@tool"),
+    ],
+)
+def test_a_context_attributes_callable_marks_the_request_and_its_library_children(
+    decorate: Any,
+    own_span: str,
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """The callable form feeds the same carrier the Mapping form feeds: the
+    wrapper resolves it from the call's own arguments, and the resolved pairs
+    stamp the request's span and the library span under it, which
+    ``require_span_attributes=`` then reads."""
+    exporter = start_sdk(require_span_attributes={"customer.id": ["acme"]})
+    provider = _core.active_provider()
+    assert provider is not None
+    tracer = provider.get_tracer("their.framework")
+
+    @decorate(
+        name="agent",
+        context_attributes=lambda customer_id, **_: {"customer.id": customer_id},
+    )
+    def run(customer_id: str, child_name: str) -> None:
+        with tracer.start_as_current_span(child_name):
+            pass
+
+    run("acme", child_name="acme child")
+    run("initech", child_name="initech child")
+
+    assert _names(exporter) == {own_span, "acme child"}
+
+
+def test_a_context_attributes_callable_resolves_on_every_call(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """Two calls with different arguments stamp different values: the callable
+    runs per call, not once at decoration."""
+    exporter = start_sdk()
+
+    @convergent.observe(
+        name="run",
+        operation="workflow",
+        context_attributes=lambda partner_id: {"partner_id": partner_id},
+    )
+    def run(partner_id: str) -> str:
+        return partner_id
+
+    assert run("acme") == "acme"
+    assert run("initech") == "initech"
+
+    stamped = [
+        (span.attributes or {}).get("convergent.attributes.partner_id")
+        for span in exporter.get_finished_spans()
+    ]
+    assert stamped == ["acme", "initech"]
+
+
+def test_a_context_attributes_callable_that_raises_still_records_the_span(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A callable whose signature does not match raises at call time. Nothing
+    reaches the caller, the span is recorded carrying only the unresolved mark,
+    and one ERROR line says so."""
+    exporter = start_sdk()
+
+    @convergent.observe(
+        name="run",
+        operation="workflow",
+        context_attributes=lambda: {"unreachable": True},
+    )
+    def run(partner_id: str) -> str:
+        return partner_id
+
+    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
+        assert run("acme") == "acme"
+        assert run("initech") == "initech"
+
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans] == ["run", "run"]
+    for span in spans:
+        assert not any(k.startswith("convergent.attributes.") for k in (span.attributes or {}))
+    failed = [r for r in caplog.records if "raised TypeError" in r.message]
+    assert len(failed) == 1
+
+
+def test_an_unresolved_callable_withholds_the_span_under_a_filter(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """A reject filter is a data exclusion control. When the tag cannot be
+    resolved, the span and its library children are withheld, not sent."""
+    exporter = start_sdk(reject_span_attributes={"customer.id": "initech"})
+    provider = _core.active_provider()
+    assert provider is not None
+    tracer = provider.get_tracer("their.framework")
+
+    @convergent.agent(
+        name="agent",
+        context_attributes=lambda: {"unreachable": True},
+    )
+    def run(customer_id: str) -> None:
+        with tracer.start_as_current_span("library child"):
+            pass
+
+    run("initech")
+    assert exporter.get_finished_spans() == ()
+
+
+def test_the_callable_binds_arguments_by_parameter_name(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """``lambda customer_id, **_:`` names the parameter it wants. The caller's
+    argument order does not matter, and the tag is never a positional guess."""
+    exporter = start_sdk(reject_span_attributes={"customer.id": "initech"})
+
+    @convergent.agent(
+        name="handler",
+        context_attributes=lambda customer_id, **_: {"customer.id": customer_id},
+    )
+    def handler(request_id: str, region: str, customer_id: str) -> None:
+        return None
+
+    handler("req-1", "us-east", "acme")
+    handler("req-2", region="eu-west", customer_id="initech")
+
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans] == ["invoke_agent handler"]
+    marks = spans[0].attributes or {}
+    assert marks["convergent.attributes.customer.id"] == "acme"
+
+
+def test_a_context_attributes_callable_returning_a_non_mapping_still_records_the_span(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    exporter = start_sdk()
+
+    def returns_a_list(partner_id: str) -> Any:
+        return [("partner_id", partner_id)]
+
+    @convergent.observe(name="run", operation="workflow", context_attributes=returns_a_list)
+    def run(partner_id: str) -> str:
+        return partner_id
+
+    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
+        assert run("acme") == "acme"
+        assert run("initech") == "initech"
+
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans] == ["run", "run"]
+    for span in spans:
+        assert not any(k.startswith("convergent.attributes.") for k in (span.attributes or {}))
+    rejected = [r for r in caplog.records if "must be a Mapping" in r.message]
+    assert len(rejected) == 1
+
+
+def test_a_context_attributes_callable_works_on_every_function_kind(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """The wrapper resolves the callable in the generator, async-generator, and
+    coroutine branches too, not only on a plain function."""
+    exporter = start_sdk()
+
+    def pairs(partner_id: str) -> Mapping[str, str]:
+        return {"partner_id": partner_id}
+
+    @convergent.observe(name="gen", operation="workflow", context_attributes=pairs)
+    def gen(partner_id: str) -> Iterator[str]:
+        yield partner_id
+
+    @convergent.observe(name="coro", operation="workflow", context_attributes=pairs)
+    async def coro(partner_id: str) -> str:
+        return partner_id
+
+    @convergent.observe(name="agen", operation="workflow", context_attributes=pairs)
+    async def agen(partner_id: str) -> AsyncIterator[str]:
+        yield partner_id
+
+    async def drain() -> list[str]:
+        return [item async for item in agen("hooli")]
+
+    assert list(gen("acme")) == ["acme"]
+    assert asyncio.run(coro("initech")) == "initech"
+    assert asyncio.run(drain()) == ["hooli"]
+
+    for name, expected in [("gen", "acme"), ("coro", "initech"), ("agen", "hooli")]:
+        attributes = _span_named(exporter, name).attributes or {}
+        assert attributes["convergent.attributes.partner_id"] == expected
 
 
 def test_nested_spans_merge_their_context_attributes_inner_wins(
@@ -1300,3 +1503,275 @@ def test_require_gates_a_file_destination(
     assert withheld
     assert "acme request" in content
     assert "initech request" not in content
+
+
+def test_set_context_attributes_marks_the_span_and_the_spans_after_it(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """A value known only mid-request still tags the run: the current span is
+    stamped at once, and a library span started after the call inherits."""
+    exporter = start_sdk(reject_span_attributes={"customer.id": "initech"})
+    provider = _core.active_provider()
+    assert provider is not None
+    tracer = provider.get_tracer("their.framework")
+
+    def serve(customer_id: str) -> None:
+        with convergent.span(name="handler", operation="agent_run") as run:
+            looked_up = customer_id.upper().lower()
+            run.set_context_attributes({"customer.id": looked_up})
+            with tracer.start_as_current_span("library child"):
+                pass
+
+    serve("acme")
+    serve("initech")
+
+    spans = exporter.get_finished_spans()
+    assert sorted(span.name for span in spans) == ["invoke_agent handler", "library child"]
+    for span in spans:
+        assert (span.attributes or {})["convergent.attributes.customer.id"] == "acme"
+
+
+def test_set_context_attributes_scope_ends_with_the_span(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    exporter = start_sdk()
+
+    with convergent.span(name="first", operation="agent_run") as first:
+        first.set_context_attributes({"customer.id": "acme"})
+    with convergent.span(name="second", operation="agent_run"):
+        pass
+
+    by_name = {span.name: span.attributes or {} for span in exporter.get_finished_spans()}
+    assert by_name["invoke_agent first"]["convergent.attributes.customer.id"] == "acme"
+    assert "convergent.attributes.customer.id" not in by_name["invoke_agent second"]
+
+
+def test_set_context_attributes_is_refused_off_its_span(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A handle kept past its span, or used where its span is not current,
+    would scope pairs to whatever is running now. Refused and logged."""
+    exporter = start_sdk()
+
+    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
+        with convergent.span(name="outer", operation="agent_run") as outer:
+            with convergent.span(name="inner", operation="workflow"):
+                outer.set_context_attributes({"customer.id": "acme"})
+        outer.set_context_attributes({"customer.id": "late"})
+
+    for span in exporter.get_finished_spans():
+        assert "convergent.attributes.customer.id" not in (span.attributes or {})
+    assert any("set_context_attributes" in r.message for r in caplog.records)
+
+
+def test_a_callable_handed_to_span_is_reported_and_withheld_under_a_filter(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``span()`` has no call arguments to hand a callable. It says so, and a
+    filtered process withholds the span rather than sending it untagged."""
+    exporter = start_sdk(reject_span_attributes={"customer.id": "initech"})
+
+    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
+        with convergent.span(
+            name="handler",
+            operation="agent_run",
+            context_attributes=lambda: {"customer.id": "initech"},  # type: ignore[arg-type]
+        ):
+            pass
+
+    assert exporter.get_finished_spans() == ()
+    assert any("span()" in r.message and "context_attributes" in r.message for r in caplog.records)
+
+
+def test_a_callable_that_itself_raises_withholds_under_a_filter(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The customer-shaped failure: the lambda binds fine and then raises."""
+    exporter = start_sdk(reject_span_attributes={"customer.id": "initech"})
+    customers: dict[str, str] = {}
+
+    @convergent.agent(
+        name="handler",
+        context_attributes=lambda customer_id, **_: {"customer.id": customers[customer_id]},
+    )
+    def handler(customer_id: str) -> None:
+        return None
+
+    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
+        handler("initech")
+
+    assert exporter.get_finished_spans() == ()
+    assert any("raised KeyError" in r.message for r in caplog.records)
+
+
+def test_an_unresolved_span_is_withheld_past_the_attribute_limit(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """Eviction cannot rescue a withheld span: the mark is never in the
+    bounded attribute bag, so a span that outgrows the limit stays withheld."""
+    exporter = start_sdk(reject_span_attributes={"customer.id": "initech"})
+
+    @convergent.agent(name="handler", context_attributes=lambda: {"never": True})
+    def handler(customer_id: str) -> None:
+        run = convergent.current_span()
+        for index in range(200):
+            run.set_attribute(f"noise.{index}", "x")
+
+    handler("initech")
+    assert exporter.get_finished_spans() == ()
+
+
+def test_the_callable_binds_on_a_method_and_a_kwargs_handler(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """A method hands the callable ``self=``; ``**_`` absorbs it. A handler
+    taking only ``**kwargs`` hands one ``kwargs`` mapping under that name."""
+    exporter = start_sdk()
+
+    class Desk:
+        @convergent.observe(
+            name="method",
+            operation="workflow",
+            context_attributes=lambda customer_id, **_: {"customer.id": customer_id},
+        )
+        def serve(self, customer_id: str) -> None:
+            return None
+
+    @convergent.observe(
+        name="kwargs-only",
+        operation="workflow",
+        context_attributes=lambda kwargs: {"customer.id": kwargs["customer_id"]},
+    )
+    def loose(**kwargs: str) -> None:
+        return None
+
+    Desk().serve("acme")
+    loose(customer_id="acme")
+
+    stamped = [
+        (span.attributes or {}).get("convergent.attributes.customer.id")
+        for span in exporter.get_finished_spans()
+    ]
+    assert stamped == ["acme", "acme"]
+
+
+def test_set_context_attributes_with_no_usable_pair_withholds_under_a_filter(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """Pairs were asked for and none arrived, so the span is withheld rather
+    than sent untagged past a reject rule."""
+    exporter = start_sdk(reject_span_attributes={"customer.id": "initech"})
+
+    with convergent.span(name="broken-value", operation="agent_run") as run:
+        run.set_context_attributes({"customer.id": ["initech", "list"]})  # type: ignore[dict-item]
+    with convergent.span(name="not-a-mapping", operation="agent_run") as run:
+        run.set_context_attributes("initech")  # type: ignore[arg-type]
+
+    assert exporter.get_finished_spans() == ()
+
+
+def test_a_handle_mark_reads_dead_once_its_generators_drain(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """Marks made through the handle honor the liveness guard the mapping form
+    honors: after two interleaved generators drain, the ambient context holds
+    no live pairs, and a later span's stamps agree with its recorded parent."""
+    exporter = start_sdk()
+
+    def work(value: str) -> Generator[None, None, None]:
+        with convergent.span(name=f"gen-{value}", operation="workflow") as handle:
+            handle.set_context_attributes({"k": value})
+            yield
+
+    def drive() -> None:
+        first, second = work("one"), work("two")
+        next(first)
+        next(second)
+        first.close()
+        second.close()
+        assert dict(_processors.context_pairs()) == {}
+        with convergent.span(name="fresh", operation="workflow"):
+            pass
+
+    contextvars.copy_context().run(drive)
+    fresh = _span_named(exporter, "fresh")
+    stamped = (fresh.attributes or {}).get("convergent.attributes.k")
+    if fresh.parent is None:
+        assert stamped is None
+    else:
+        parent = next(
+            s
+            for s in exporter.get_finished_spans()
+            if s.context is not None and s.context.span_id == fresh.parent.span_id
+        )
+        assert stamped == (parent.attributes or {}).get("convergent.attributes.k")
+
+
+def test_a_callable_resolving_only_unusable_values_withholds_under_a_filter(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """The production failure shape: a lookup miss hands back a mapping whose
+    value is None. Pairs were asked for and none survived, so the span and its
+    library child are withheld rather than sent untagged."""
+    exporter = start_sdk(reject_span_attributes={"customer.id": "initech"})
+    provider = _core.active_provider()
+    assert provider is not None
+    tracer = provider.get_tracer("their.framework")
+    customers: dict[str, str] = {}
+
+    @convergent.agent(
+        name="handler",
+        context_attributes=lambda token, **_: {"customer.id": customers.get(token)},  # type: ignore[arg-type]
+    )
+    def handler(token: str) -> None:
+        with tracer.start_as_current_span("library child"):
+            pass
+
+    handler("missing-token")
+    assert exporter.get_finished_spans() == ()
+
+
+def test_an_unreadable_signature_fails_closed(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A C-level callable has no readable signature. Decoration must not raise,
+    and the runs are withheld under a filter rather than sent untagged."""
+    exporter = start_sdk(reject_span_attributes={"customer.id": "initech"})
+    monkeypatch.setattr(inspect, "signature", mock.Mock(side_effect=ValueError("no signature")))
+
+    @convergent.agent(
+        name="handler",
+        context_attributes=lambda customer_id, **_: {"customer.id": customer_id},
+    )
+    def handler(customer_id: str) -> None:
+        return None
+
+    handler("initech")
+    assert exporter.get_finished_spans() == ()
+
+
+def test_set_context_attributes_is_refused_on_a_foreign_span(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A library's span has no release point, so a mark there would never die.
+    The call is refused and the run stays untagged rather than mistagged."""
+    exporter = start_sdk()
+    provider = _core.active_provider()
+    assert provider is not None
+    tracer = provider.get_tracer("their.framework")
+
+    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
+        with convergent.span(name="run", operation="agent_run"):
+            with tracer.start_as_current_span("library child"):
+                convergent.current_span().set_context_attributes({"customer.id": "acme"})
+
+    spans = exporter.get_finished_spans()
+    assert sorted(span.name for span in spans) == ["invoke_agent run", "library child"]
+    for span in spans:
+        assert "convergent.attributes.customer.id" not in (span.attributes or {})
+    assert any("not a span Convergent opened" in r.message for r in caplog.records)
