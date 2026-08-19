@@ -12,8 +12,8 @@ section may describe a version whose tag does not exist yet.
   and `reject_span_attributes=` withholds a whole run, library spans included.
 - A span's own `context_attributes=` adds pairs and wins for a key both hold.
   Its descendants follow the override.
-- The deployment registration warning names the endpoint's scheme and host, so
-  an endpoint the environment changed is visible in one line.
+- The warning for a failed deployment registration now names the endpoint it
+  called.
 
 ## 0.0.6
 

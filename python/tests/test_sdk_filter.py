@@ -698,12 +698,12 @@ def test_interleaved_generators_leave_no_mark_behind(
     start_sdk: Callable[..., InMemorySpanExporter],
 ) -> None:
     """Two decorated generators drained in creation order detach their context
-    tokens out of order, and ``context.detach`` then restores a context that
-    still names the first generator's scope. The liveness guard makes that
-    stale scope read as no live values -- after both drain, the context
-    carries no pairs -- and a later span under the stale context inherits its
-    recorded parent span's stamps, never the stale scope's values. The stamps
-    always agree with the parentage."""
+    tokens out of order. ``context.detach`` then restores a context that still
+    names the first generator's scope.
+
+    The liveness guard makes that stale scope read as no live values. A later
+    span takes its pairs from its recorded parent span instead. The stamps and
+    the parentage always agree."""
     exporter = start_sdk(require_span_attributes={"customer.id": ["acme", "initech"]})
     provider = _core.active_provider()
     assert provider is not None
