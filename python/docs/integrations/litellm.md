@@ -28,6 +28,11 @@ litellm does not depend on it, so without it litellm logs
 `Error initializing custom logger` at startup, records nothing, and keeps
 answering requests.
 
+litellm loads a `.env` file at import. The search walks up from the working
+directory. That file can set `CONVERGENT_ENDPOINT` or `CONVERGENT_API_KEY`.
+After you add litellm, verify the endpoint in the
+[`check()`](../reference/api.md#check) report.
+
 ## Enable
 
 ```python

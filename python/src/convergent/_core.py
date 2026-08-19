@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 import time
+import urllib.parse
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from importlib.metadata import PackageNotFoundError, version
@@ -976,10 +977,17 @@ def _register_deployment(
         reason = "unexpected"
         unexpected = True
 
+    # Scheme and host are in the message because an environment override -- a
+    # .env file a library import loaded, say -- is otherwise invisible here.
+    # Never the full URL: one that passes validation can still carry userinfo
+    # or a query-string token, and _config's convention is never to echo it.
+    parsed = urllib.parse.urlsplit(endpoint)
     logger.warning(
-        "Convergent deployment registration failed; traces will carry the release "
-        "fingerprint for the server to resolve",
-        extra={"reason": reason},
+        "Convergent deployment registration failed at %s://%s (%s); traces will "
+        "carry the release fingerprint for the server to resolve",
+        parsed.scheme,
+        parsed.hostname or "",
+        reason,
         exc_info=unexpected,
     )
     return {"convergent.deployment.fingerprint": release}, None

@@ -284,7 +284,7 @@ def counts(spans: list[Span], total: int) -> list[str]:
         f"model calls with token usage: {with_usage}",
         f"tool calls: {roles[TOOL_CALL]}",
         "releases: " + (", ".join(_clip(release) for release in releases) if releases else "none"),
-        "marks: "
+        "context attributes: "
         + (
             ", ".join(f"{mark} ({count} spans)" for mark, count in sorted(marks.items()))
             if marks

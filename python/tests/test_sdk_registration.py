@@ -215,6 +215,45 @@ def test_registration_failure_stamps_the_fingerprint_and_keeps_tracing(
     assert exporter.get_finished_spans(), "tracing survives a failed registration"
 
 
+def test_the_registration_failure_warning_names_the_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    exporter: InMemorySpanExporter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ``.env`` file a library import loads can silently move
+    ``CONVERGENT_ENDPOINT``; the one warning has to say where the POST went."""
+    _record_posts(monkeypatch, result=_registry.RegistrationError("http_401"))
+
+    with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
+        convergent.init(api_key=_KEY, endpoint=_ENDPOINT, release="v9")
+
+    record = next(r for r in caplog.records if "registration" in r.getMessage())
+    assert _ENDPOINT in record.getMessage()
+    assert "http_401" in record.getMessage()
+    assert _KEY not in record.getMessage()
+
+
+def test_the_warning_never_echoes_userinfo_or_query(
+    monkeypatch: pytest.MonkeyPatch,
+    exporter: InMemorySpanExporter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A URL can pass validation while carrying credentials. The warning names
+    scheme and host only -- no userinfo, no path, no query."""
+    _record_posts(monkeypatch, result=_registry.RegistrationError("http_401"))
+
+    endpoint = "https://ops:s3cr3t@dp.example.test/base?api_key=tok123"  # pragma: allowlist secret
+    with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
+        convergent.init(api_key=_KEY, endpoint=endpoint, release="v9")
+
+    record = next(r for r in caplog.records if "registration" in r.getMessage())
+    message = record.getMessage()
+    assert "https://dp.example.test" in message
+    assert "s3cr3t" not in message
+    assert "tok123" not in message
+    assert "/base" not in message
+
+
 def test_unexpected_registration_error_also_fails_open(
     monkeypatch: pytest.MonkeyPatch, exporter: InMemorySpanExporter
 ) -> None:

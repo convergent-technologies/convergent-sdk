@@ -14,8 +14,15 @@ then the resource attribute. The first source holding the key answers.
 
 A caller marks one request with ``span(..., context_attributes={...})``. The
 pairs live in a private OpenTelemetry context value for the span's lifetime,
-and :class:`ContextAttributesSpanProcessor` copies every pair onto each span
-at start under ``convergent.attributes.<key>``, library spans included. The
+and :class:`ContextAttributesSpanProcessor` stamps each span at start under
+``convergent.attributes.<key>``, library spans included. Every span inherits
+its parent span's stamped attributes -- a library such as litellm starts its
+spans under a context built from the parent span alone, or replays a saved
+context after the caller's block closed, and parentage carries the attributes
+through both. The span's own live scope adds pairs and wins for a key both
+hold. Values never come from a withdrawn scope's pairs -- only from the
+parent span's stamps -- so a span cannot carry values that disagree with its
+parentage. The
 context value stays in the process: ``inject()`` writes nothing for it, unlike
 baggage, which a propagator writes into every outbound request. The stamp is a
 span attribute under its own prefix, so it overwrites nothing the caller or a
@@ -32,7 +39,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from opentelemetry import context
+from opentelemetry import context, trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
 
@@ -46,6 +53,18 @@ _CONTEXT_ATTRIBUTES = context.create_key("convergent-context-attributes")
 #: Every context pair is stamped under this prefix. ``set_attribute`` rejects
 #: caller keys starting with ``convergent.``, so only the stamper writes here.
 _MARK_PREFIX = "convergent.attributes."
+
+#: The stamper also stores each span's resolved pairs on the span object under
+#: this name, and inheritance reads that field rather than the span's public
+#: attributes. The public bag is bounded -- the mark is its oldest entry, so it
+#: is the first one evicted -- and it mutates under the caller's thread, so a
+#: cross-thread read can raise. The private field is written once at start,
+#: before any other thread holds the span, and never changes.
+_MARKS_FIELD = "_convergent_marks"
+
+#: Whether any mark scope was ever attached in this process. A process that
+#: never marks pays nothing at span start: no context read, no parent lookup.
+_ever_attached = False
 
 
 class _Mark:
@@ -74,6 +93,8 @@ def attach_context(pairs: Mapping[str, Any]) -> object:
     Nested scopes merge, and the inner pair wins for a key both set. ``span()``
     validates the pairs before calling this.
     """
+    global _ever_attached
+    _ever_attached = True
     parent = context.get_value(_CONTEXT_ATTRIBUTES)
     mark = _Mark(pairs, parent if isinstance(parent, _Mark) else None)
     return context.attach(context.set_value(_CONTEXT_ATTRIBUTES, mark)), mark
@@ -110,6 +131,27 @@ def context_pairs(parent_context: Context | None = None) -> Mapping[str, Any]:
     return pairs
 
 
+def _parent_marks(parent_context: Context | None) -> Mapping[str, Any]:
+    """The parent span's stamped marks, bare-keyed, for a span outside the scope.
+
+    litellm starts spans under a context it builds from the parent span alone,
+    so the mark carrier is absent and ``context_pairs`` answers nothing. The
+    parent's stamps are what that scope held when the parent started, so the
+    child inherits them.
+
+    The stamps come from the parent's private marks field, never from its
+    public attributes: the public bag evicts its oldest entry -- the mark --
+    past the span attribute limit, and iterating it from this thread races the
+    caller's writes. A remote or absent parent is not a local SDK span and
+    answers nothing.
+    """
+    parent = trace.get_current_span(parent_context)
+    if not isinstance(parent, Span):
+        return {}
+    marks = getattr(parent, _MARKS_FIELD, None)
+    return dict(marks) if marks else {}
+
+
 def wrap(
     policy: _policy.Policy | None,
     agents: Sequence[str] | None,
@@ -141,10 +183,25 @@ class ContextAttributesSpanProcessor(SpanProcessor):
         # Guarded the way FilterSpanProcessor.on_end is: the tracer provider
         # calls its processors in a bare loop, so an exception here would
         # reach the caller's application code. Warn once and stamp nothing.
+        if not _ever_attached:
+            return
         try:
-            for key, value in context_pairs(parent_context).items():
+            # A span always inherits its parent's stamped attributes. Its own
+            # live scope adds to them, and wins for a key both hold. Values
+            # never come from a withdrawn scope's pairs -- only from the
+            # parent span's stamps -- so a span can never carry values that
+            # disagree with its parentage.
+            pairs = {**_parent_marks(parent_context), **context_pairs(parent_context)}
+            stamped: dict[str, Any] = {}
+            for key, value in pairs.items():
                 if _policy._is_attribute_value(value):
                     span.set_attribute(_MARK_PREFIX + key, value)
+                    stamped[key] = value
+            if stamped:
+                # The span's own copy, for its children to inherit. Written
+                # before start_span returns, so no other thread holds the span
+                # yet, and never touched again -- see _MARKS_FIELD.
+                setattr(span, _MARKS_FIELD, stamped)
         except Exception:  # noqa: BLE001 - a raise here would break the caller's request
             from . import _core  # deferred: _core imports this module
 
