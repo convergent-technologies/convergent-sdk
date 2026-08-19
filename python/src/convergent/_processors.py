@@ -37,6 +37,7 @@ The require direction fails closed. A span it cannot place is withheld.
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -59,8 +60,28 @@ _MARK_PREFIX = "convergent.attributes."
 #: name. Inheritance reads that field, never the span's public attributes. The
 #: public bag is bounded, and it evicts its oldest entry first. It also mutates
 #: under the caller's thread, so a cross-thread read can raise. The private
-#: field is written once at start, and never changes.
+#: field is written at span start, and again by mark_span for pairs a caller
+#: adds while the span runs.
 _MARKS_FIELD = "_convergent_marks"
+
+#: Attached by ``span()`` and ``mark_span`` when context attributes were
+#: requested but could not
+#: resolved. :class:`FilterSpanProcessor` withholds every span carrying it.
+#: A caller cannot write it: ``_accepted_context`` rejects ``convergent.`` keys.
+UNRESOLVED = "convergent.unresolved"
+
+#: Withheld spans remembered at once. A span that never ends never leaves the
+#: table, so the table is capped the way the egress filter's is.
+_UNRESOLVED_LIMIT = 4_096
+
+#: Context tokens for marks made through a handle, stored on the span object
+#: the way ``_MARKS_FIELD`` is, because the span owns their lifetime. ``span()``
+#: drains them when the block exits, whichever handle made them.
+_MARK_TOKENS_FIELD = "_convergent_mark_tokens"
+
+#: The live filters, so ``mark_span`` can withhold a span whose pairs failed
+#: after the span already started. Weak: a re-``init()`` drops the old filter.
+_FILTERS: weakref.WeakSet[FilterSpanProcessor] = weakref.WeakSet()
 
 #: Whether any scope was ever attached in this process. A process that sets no
 #: context attributes pays nothing at span start.
@@ -131,6 +152,46 @@ def context_pairs(parent_context: Context | None = None) -> Mapping[str, Any]:
     return pairs
 
 
+def mark_span(span: trace.Span, pairs: Mapping[str, Any]) -> None:
+    """Stamp ``pairs`` onto a running span and scope them to the rest of it.
+
+    The span's own stamp, its private marks field, and the ambient context all
+    get the pairs, so spans started after this call inherit them. The context
+    token is kept on the span, and :func:`release_marks` drains it when the
+    span's block exits, whichever handle made the mark. Never raises.
+    """
+    try:
+        if UNRESOLVED in pairs:
+            span_id = span.get_span_context().span_id
+            for filter_ in tuple(_FILTERS):
+                filter_.withhold(span_id)
+        for key, value in pairs.items():
+            if key != UNRESOLVED:
+                span.set_attribute(_MARK_PREFIX + key, value)
+        merged = {**(getattr(span, _MARKS_FIELD, None) or {}), **pairs}
+        setattr(span, _MARKS_FIELD, merged)
+        tokens = getattr(span, _MARK_TOKENS_FIELD, None)
+        if tokens is None:
+            tokens = []
+            setattr(span, _MARK_TOKENS_FIELD, tokens)
+        tokens.append(attach_context(pairs))
+    except Exception:  # noqa: BLE001 - a raise here would break the caller's request
+        from . import _core  # deferred: _core imports this module
+
+        _core._warn_once(
+            "mark_span_failed",
+            "Convergent could not scope context attributes to the running span.",
+        )
+
+
+def release_marks(span: trace.Span) -> None:
+    """Detach every mark made on ``span`` through a handle. Never raises."""
+    tokens = getattr(span, _MARK_TOKENS_FIELD, None) or []
+    for token in reversed(tokens):
+        detach_context(token)
+    tokens.clear()
+
+
 def _parent_marks(parent_context: Context | None) -> Mapping[str, Any]:
     """The parent span's stamped pairs, bare-keyed.
 
@@ -187,7 +248,12 @@ class ContextAttributesSpanProcessor(SpanProcessor):
             pairs = {**_parent_marks(parent_context), **context_pairs(parent_context)}
             stamped: dict[str, Any] = {}
             for key, value in pairs.items():
-                if _policy._is_attribute_value(value):
+                if key == UNRESOLVED:
+                    # Never a span attribute: the bounded bag evicts oldest-first
+                    # past the attribute limit, and this mark losing that race
+                    # would send the span it exists to withhold.
+                    stamped[key] = True
+                elif _policy._is_attribute_value(value):
                     span.set_attribute(_MARK_PREFIX + key, value)
                     stamped[key] = value
             if stamped:
@@ -224,16 +290,40 @@ _STAMPER = ContextAttributesSpanProcessor()
 class FilterSpanProcessor(SpanProcessor):
     """Forwards to ``destinations`` only the spans ``policy`` keeps.
 
-    Stateless: the decision reads the finished span at ``on_end`` and nothing
-    is remembered between calls. If ``agents=`` is also set, its filter runs
-    first and this one sees only the spans it kept.
+    The decision reads the finished span at ``on_end``. The one thing
+    remembered between calls is the withhold table, span ids whose context
+    attributes could not be resolved. If ``agents=`` is also set, its filter
+    runs first and this one sees only the spans it kept.
     """
 
     def __init__(self, policy: _policy.Policy, destinations: Sequence[SpanProcessor]) -> None:
         self._policy = policy
         self._destinations = tuple(destinations)
+        #: Span ids to withhold, written at start and read at end. No lock:
+        #: one span starts once and ends once.
+        self._unresolved: set[int] = set()
+        _FILTERS.add(self)
+
+    def withhold(self, span_id: int) -> None:
+        """Withhold this span at its end, whatever its attributes say."""
+        if len(self._unresolved) >= _UNRESOLVED_LIMIT:
+            from . import _core  # deferred: _core imports this module
+
+            _core._warn_once(
+                "unresolved_table_full",
+                f"Convergent is tracking {_UNRESOLVED_LIMIT} withheld spans that "
+                "never ended and is dropping the oldest records. A span whose "
+                "record is dropped is judged by its attributes when it ends.",
+            )
+            self._unresolved.pop()
+        self._unresolved.add(span_id)
 
     def on_start(self, span: Span, parent_context: Context | None = None) -> None:
+        # on_end receives a snapshot of the span, so the marks field is only
+        # readable here, and the span id is the one key both calls share.
+        span_context = span.get_span_context()
+        if span_context is not None and UNRESOLVED in (getattr(span, _MARKS_FIELD, None) or {}):
+            self.withhold(span_context.span_id)
         for destination in self._destinations:
             destination.on_start(span, parent_context)
 
@@ -244,6 +334,11 @@ class FilterSpanProcessor(SpanProcessor):
         # Fail closed. Being unable to decide is not a reason to send.
         try:
             attributes = span.attributes or {}
+            span_context = span.get_span_context()
+            if span_context is not None and span_context.span_id in self._unresolved:
+                # Fail closed. An unresolvable tag is not a reason to send.
+                self._unresolved.discard(span_context.span_id)
+                return
             marks = {
                 key[len(_MARK_PREFIX) :]: value
                 for key, value in attributes.items()
@@ -278,9 +373,11 @@ class FilterSpanProcessor(SpanProcessor):
 
 
 __all__ = [
+    "UNRESOLVED",
     "ContextAttributesSpanProcessor",
     "FilterSpanProcessor",
     "attach_context",
+    "mark_span",
     "context_pairs",
     "detach_context",
     "wrap",

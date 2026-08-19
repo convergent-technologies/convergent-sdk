@@ -263,9 +263,29 @@ input and output.
   is recorded exactly as you wrote it.
 - **`attributes`** (`Mapping[str, str | bool | int | float]`, optional):
   attributes for that one span.
-- **`context_attributes`** (`Mapping[str, str | bool | int | float]`,
+- **`context_attributes`** ([`ContextAttributes`](#contextattributes),
   optional): pairs set in the OpenTelemetry context while the call runs. They
-  land on that span and on every span started during the call.
+  land on that span and on every span started during the call. Pass the
+  `Mapping` directly, or pass a callable that returns one. The SDK calls it
+  once per call, with the decorated function's own arguments, so the pairs can
+  come from the call itself:
+
+  ```python
+  @convergent.agent(
+      name="support-agent",
+      context_attributes=lambda customer_id, **_: {"customer.id": customer_id},
+  )
+  def handle(customer_id: str, ticket: str) -> str: ...
+  ```
+
+  The callable receives the arguments bound to their parameter names. Name
+  the parameters you need and absorb the rest with `**_`. On a method the
+  names include `self`. A function taking only `**kwargs` hands the callable
+  one `kwargs` mapping under that name. A callable that
+  raises, or that returns something that is not a `Mapping`, is logged once.
+  The span is still recorded for your own destinations, and it is withheld
+  when `require_span_attributes=` or `reject_span_attributes=` is configured,
+  because an untagged span must not slip past a filter.
   [span()](#span) states the full rules for both parameters.
 
 A generator's span covers the whole iteration, and abandoning one early is not
@@ -296,9 +316,9 @@ def handle(ticket): ...
 - **`name`** (`str`, required): the agent's identity in your workspace.
   Required on purpose: deriving it from the function name would let a rename
   in the code rename the agent.
-- **`attributes`**, **`context_attributes`**
-  (`Mapping[str, str | bool | int | float]`, optional): as on
-  [observe()](#observe).
+- **`attributes`** (`Mapping[str, str | bool | int | float]`, optional) and
+  **`context_attributes`** ([`ContextAttributes`](#contextattributes),
+  optional): as on [observe()](#observe).
 
 ### tool()
 
@@ -319,9 +339,9 @@ def lookup_invoice(invoice_id): ...
 
 - **`name`** (`str`, optional; default: the decorated function's `__name__`):
   the tool's name.
-- **`attributes`**, **`context_attributes`**
-  (`Mapping[str, str | bool | int | float]`, optional): as on
-  [observe()](#observe).
+- **`attributes`** (`Mapping[str, str | bool | int | float]`, optional) and
+  **`context_attributes`** ([`ContextAttributes`](#contextattributes),
+  optional): as on [observe()](#observe).
 
 Write it as `@convergent.tool()` or `@convergent.tool(name="lookup_invoice")`.
 The bare `@convergent.tool` form is not supported.
@@ -352,7 +372,8 @@ with convergent.span(name="answer", operation="model_call") as handle:
 - **`context_attributes`** (`Mapping[str, str | bool | int | float]`,
   optional): pairs set in the OpenTelemetry context for the block's lifetime.
   They land on that span and on every span started inside the block, library
-  spans included.
+  spans included. The Mapping form only: a `with` block has no call arguments
+  to resolve the callable form the decorators take.
 
 The `context_attributes` pairs live in the OpenTelemetry context for exactly
 the block's lifetime. The SDK stamps
@@ -430,6 +451,7 @@ for the other two.
 | `set_input(value)` | writes `gen_ai.input.messages`, or `gen_ai.tool.call.arguments` on a tool call |
 | `set_output(value)` | writes `gen_ai.output.messages`, or `gen_ai.tool.call.result` on a tool call |
 | `set_attribute(key, value)` | writes one attribute of your own |
+| `set_context_attributes(pairs)` | marks this span and every span started after the call inside it, for the [span filters](#span-filters) |
 | `set_tool_call_id(call_id)` | writes `gen_ai.tool.call.id`, which pairs the model's request for a call with the call itself |
 | `trace_id` | the trace the span sits in, as a hex string |
 | `span_id` | the span's own id, as a hex string |
@@ -441,6 +463,19 @@ content of one message.
 
 `set_attribute()` drops any key starting with `convergent.` and these eight, and
 logs one line naming the key.
+
+`set_context_attributes()` takes the pairs you only know mid-request, such as a
+customer id looked up from a token. It stamps the running span at once, and
+every span started after the call inherits the pairs until the span ends. Spans
+started before the call keep what they had. Call it inside the span it marks,
+on the thread the span runs on; anywhere else it is refused and logged. Each
+pair passes the same guards as `context_attributes=`. When pairs were passed
+and none is usable, the span is withheld under any span filter, the same rule
+the callable form follows. The handle must be on a span the SDK opened. On a
+span another library opened, the call is refused and logged, because nothing
+would release the pairs when that span ends. A refused call leaves the span
+untagged, and an untagged span does not match a `reject_span_attributes=`
+rule.
 
 ```
 gen_ai.operation.name    gen_ai.input.messages
@@ -535,6 +570,17 @@ deadline, and `elapsed_ms` reports how long it really took. Each export request 
 variable when you need a tighter ceiling. It bounds the network exporter only. A
 file or console drain depends on the disk or stream underneath it and has no
 deadline the SDK enforces.
+
+### ContextAttributes
+
+```python
+def marked(context_attributes: convergent.ContextAttributes) -> None: ...
+```
+
+What the decorators accept for `context_attributes=`: the
+`Mapping[str, str | bool | int | float]` itself, or a callable returning one,
+which the SDK resolves from the decorated function's own arguments on every
+call. Exported for annotating your own; see [observe()](#observe).
 
 ## Destinations
 

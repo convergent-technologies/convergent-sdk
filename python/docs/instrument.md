@@ -32,9 +32,21 @@ def answer(question: str) -> str:
 
 `attributes` lands on the run span alone. To put a key on the run and on every
 span inside it — which is what the [span filters](reference/api.md#span-filters)
-read first — pass `context_attributes=`. When the value varies per request, open
-the run with `span()`, because a decorator's mapping is fixed when the module
-loads.
+read first — pass `context_attributes=`. When the value varies per request, pass
+a callable instead of the mapping. The SDK calls it on every call, with the
+decorated function's arguments bound to their parameter names. Name the
+parameters you need and absorb the rest with `**_`.
+
+```python
+@convergent.agent(
+    name="support-agent",
+    context_attributes=lambda customer_id, **_: {"customer.id": customer_id},
+)
+def handle(customer_id: str, ticket: str) -> str:
+    ...
+```
+
+`span()` takes the mapping form only. Its block runs inside the request, so build the mapping there:
 
 ```python
 with convergent.span(
