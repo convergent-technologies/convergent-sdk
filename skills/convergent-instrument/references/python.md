@@ -65,16 +65,24 @@ When the request is about privacy, report that to the user.
 If no source holds the key, `require_span_attributes=` sends nothing.
 An unmarked span under `reject_span_attributes=` is sent.
 
+Set the filters once, in `init()`. They judge every span in the process.
+Every span inherits its parent span's stamped context attributes, whatever thread or context it starts on.
+A span's own `context_attributes=` adds pairs and wins for a key both hold. Its descendants follow the override.
+A span with no in-process parent inherits nothing.
+When application code starts rootless spans on another thread, open a `span()` with `context_attributes=` there, or use a threading instrumentor.
+OpenTelemetry's `ThreadingInstrumentor` is one.
+A separate process inherits nothing. Configure the SDK and the filters in each process.
+
 Prove a new or changed filter with one recording.
 Exercise one request the filter keeps and one it withholds, into a temporary spans directory.
-Require the recording to hold exactly the kept run, with its `convergent.attributes.<key>` marks.
+Require the recording to hold exactly the kept run, with its `convergent.attributes.<key>` stamps.
 Require zero spans from the withheld request.
 Under `require_span_attributes=`, check the whole spans file, not one agent's subtree.
 Every unmarked span in the process is withheld, other agents included.
 Read the spans file.
 An HTTP status is not proof.
 Confirm the printed `check()` report names the filter in its `filters` row (the row exists since SDK 0.0.6).
-An empty recording means the mark is missing or every request was withheld; check the mark first.
+An empty recording means `context_attributes=` is missing or every request was withheld; check the attribute first.
 
 ## Preserve import order
 
@@ -112,6 +120,9 @@ Install one package that can wrap each request.
 Use litellm's built-in OpenTelemetry callback for litellm.
 Append `"otel"` to `litellm.callbacks`.
 Set `USE_OTEL_LITELLM_REQUEST_SPAN=true` for that callback.
+litellm loads a `.env` file at import, and that file can set
+`CONVERGENT_ENDPOINT` or `CONVERGENT_API_KEY`.
+After you add litellm, verify the endpoint in the `check()` report.
 
 Use pydantic-ai's `Instrumentation` capability for pydantic-ai.
 Pass `convergent.tracer_provider()` to its settings.

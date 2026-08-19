@@ -64,11 +64,11 @@ Check these facts:
 
 Check fact 17 in both directions when the run uses `require_span_attributes=`
 or `reject_span_attributes=`.
-Confirm each kept span carries its expected `convergent.attributes.<key>` mark.
+Confirm each kept span carries its expected `convergent.attributes.<key>` attribute.
 Confirm the recording contains no run the filter must withhold.
 Remember the filters run in front of every destination, so a withheld run
 appears in no spans file.
-Treat an empty recording under `require_span_attributes=` as a missing mark
+Treat an empty recording under `require_span_attributes=` as a missing context attribute
 before treating it as broken instrumentation.
 
 Read the matching SDK integration page before judging a non-`convergent.sdk` scope.

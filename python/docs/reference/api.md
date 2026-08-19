@@ -124,6 +124,21 @@ The stamped mark answers first, then the span's own attribute, then the
 resource. Your own exporters receive the stamp and every span: the filters
 govern only the destinations the SDK set up.
 
+Context attributes across threads and processes:
+
+- Set the filters once, in `init()`. They judge every span in the process.
+- Every span inherits its parent span's stamped context attributes, whatever
+  thread or context it starts on. A library that parents its spans to your
+  run inherits the run's attributes this way.
+- A span's own `context_attributes=` adds pairs and wins for a key both hold.
+  Its descendants follow the override.
+- A span with no in-process parent inherits nothing. When your own code
+  starts rootless spans on another thread, open a `span()` with
+  `context_attributes=` there, or use a threading instrumentor.
+  OpenTelemetry's `ThreadingInstrumentor` is one.
+- A separate process inherits nothing. Configure the SDK and the filters in
+  each process.
+
 The matching rules:
 
 - Comparison is exact, by type and case. `1` matches neither `"1"` nor

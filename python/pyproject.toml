@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "convergent-sdk"
-version = "0.0.6"
+version = "0.0.7"
 description = "Records your Python AI agent runs as OpenTelemetry spans and sends them to Convergent."
 readme = "README.md"
 license = "Apache-2.0"

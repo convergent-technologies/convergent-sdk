@@ -170,6 +170,208 @@ def test_a_mark_around_a_request_keeps_its_spans_library_spans_included() -> Non
         assert (span.attributes or {})["convergent.attributes.customer.id"] == "acme"
 
 
+def test_a_span_parented_by_hand_inherits_the_parent_marks() -> None:
+    """litellm starts model spans under ``set_span_in_context(parent)`` -- a
+    context with no mark scope. The child inherits the parent's stamped marks,
+    so ``require_span_attributes=`` keeps it with the rest of the run."""
+    provider, exporter = _filtered_provider()
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "acme"}):
+        parent = tracer.start_span("invoke_agent lead")
+    child = tracer.start_span("chat gpt-4o-mini", context=trace.set_span_in_context(parent))
+    child.end()
+    parent.end()
+    provider.force_flush()
+
+    assert _names(exporter) == {"invoke_agent lead", "chat gpt-4o-mini"}
+    kept = _span_named(exporter, "chat gpt-4o-mini")
+    assert (kept.attributes or {})["convergent.attributes.customer.id"] == "acme"
+
+
+def test_reject_withholds_a_hand_parented_child_of_a_rejected_run() -> None:
+    """The leak the litellm trials proved: under ``reject_span_attributes=`` an
+    unmarked child of an excluded run was sent, prompts included. With
+    inheritance the child carries the mark and is withheld with its run."""
+    provider, exporter = _filtered_provider(
+        _built(reject_span_attributes={"customer.id": ["initech"]})
+    )
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "initech"}):
+        parent = tracer.start_span("invoke_agent lead")
+    child = tracer.start_span("chat gpt-4o-mini", context=trace.set_span_in_context(parent))
+    child.end()
+    parent.end()
+    provider.force_flush()
+
+    assert _names(exporter) == set()
+
+
+def test_a_mark_scope_in_the_context_wins_over_parent_inheritance() -> None:
+    """Inheritance is the fallback for a context with no mark scope. A context
+    that carries one keeps its own pairs, whatever the parent holds."""
+    provider, exporter = _filtered_provider(
+        _built(require_span_attributes={"customer.id": ["acme", "globex"]})
+    )
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "acme"}):
+        parent = tracer.start_span("invoke_agent lead")
+    with _marked({"customer.id": "globex"}):
+        scoped = trace.set_span_in_context(parent, otel_context.get_current())
+        child = tracer.start_span("chat gpt-4o-mini", context=scoped)
+        child.end()
+    parent.end()
+    provider.force_flush()
+
+    kept = _span_named(exporter, "chat gpt-4o-mini")
+    assert (kept.attributes or {})["convergent.attributes.customer.id"] == "globex"
+
+
+def test_a_remote_parent_stamps_nothing() -> None:
+    """A propagated parent is a ``SpanContext`` with no attributes to read, so a
+    span started under it carries no mark, the way it always did."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    wrapped = _processors.wrap(None, None, [SimpleSpanProcessor(exporter)])
+    for processor in [_processors._STAMPER, *wrapped]:
+        provider.add_span_processor(processor)
+    remote = trace.NonRecordingSpan(
+        trace.SpanContext(
+            trace_id=0x1, span_id=0x2, is_remote=True, trace_flags=trace.TraceFlags(0x1)
+        )
+    )
+
+    span = provider.get_tracer("their.framework").start_span(
+        "chat", context=trace.set_span_in_context(remote)
+    )
+    span.end()
+    provider.force_flush()
+
+    attributes = exporter.get_finished_spans()[0].attributes or {}
+    assert not any(key.startswith("convergent.attributes.") for key in attributes)
+
+
+def test_an_explicit_override_propagates_to_its_subtree() -> None:
+    """A span's own ``context_attributes=`` overrides what it inherits, per
+    key, and its descendants follow the override. Keys the override does not
+    name flow through unchanged."""
+    provider, exporter = _filtered_provider(
+        _built(require_span_attributes={"customer.id": ["acme", "globex"]})
+    )
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "acme", "tier": "pro"}):
+        top = tracer.start_span("invoke_agent lead")
+    with _marked({"customer.id": "globex"}):
+        middle = tracer.start_span(
+            "invoke_agent subagent",
+            context=trace.set_span_in_context(top, otel_context.get_current()),
+        )
+    leaf = tracer.start_span("chat gpt-4o-mini", context=trace.set_span_in_context(middle))
+    leaf.end()
+    middle.end()
+    top.end()
+    provider.force_flush()
+
+    middle_attrs = _span_named(exporter, "invoke_agent subagent").attributes or {}
+    leaf_attrs = _span_named(exporter, "chat gpt-4o-mini").attributes or {}
+    for attrs in (middle_attrs, leaf_attrs):
+        assert attrs["convergent.attributes.customer.id"] == "globex"
+        assert attrs["convergent.attributes.tier"] == "pro"
+
+
+def test_a_parent_past_the_attribute_limit_still_yields_marks() -> None:
+    """The public attribute bag evicts its oldest entry -- the mark -- once the
+    span passes its attribute limit. Inheritance reads the private marks field,
+    so a bulky parent still passes its marks to a hand-parented child."""
+    provider, exporter = _filtered_provider()
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "acme"}):
+        parent = tracer.start_span("invoke_agent lead")
+    for index in range(200):
+        parent.set_attribute(f"bulk.{index}", index)
+    assert isinstance(parent, Span)
+    assert "convergent.attributes.customer.id" not in (parent.attributes or {}), (
+        "the eviction this test guards against did not fire; raise the churn"
+    )
+
+    child = tracer.start_span("chat gpt-4o-mini", context=trace.set_span_in_context(parent))
+    child.end()
+    parent.end()
+    provider.force_flush()
+
+    kept = _span_named(exporter, "chat gpt-4o-mini")
+    assert (kept.attributes or {})["convergent.attributes.customer.id"] == "acme"
+
+
+def test_concurrent_parent_mutation_cannot_unmark_a_child() -> None:
+    """Reading the parent's public attributes from another thread raced the
+    caller's writes; the swallowed error shipped spans unmarked. The private
+    marks field is written once at start, so attribute churn changes nothing."""
+    provider, exporter = _filtered_provider()
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "acme"}):
+        parent = tracer.start_span("invoke_agent lead")
+    stop = threading.Event()
+
+    def churn() -> None:
+        index = 0
+        while not stop.is_set():
+            parent.set_attribute(f"churn.{index % 50}", index)
+            index += 1
+
+    churner = threading.Thread(target=churn)
+    churner.start()
+    try:
+        for index in range(200):
+            child = tracer.start_span(f"chat {index}", context=trace.set_span_in_context(parent))
+            child.end()
+    finally:
+        stop.set()
+        churner.join()
+    parent.end()
+    provider.force_flush()
+
+    finished = [s for s in exporter.get_finished_spans() if s.name.startswith("chat ")]
+    assert len(finished) == 200
+    assert all(
+        (span.attributes or {}).get("convergent.attributes.customer.id") == "acme"
+        for span in finished
+    )
+
+
+def test_a_process_that_never_marked_takes_the_short_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process that never attached a mark scope pays nothing at span start:
+    the stamper returns before any context or parent read."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(_processors._STAMPER)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "acme"}):
+        parent = tracer.start_span("invoke_agent lead")
+
+    monkeypatch.setattr(_processors, "_ever_attached", False)
+    off = tracer.start_span("chat off", context=trace.set_span_in_context(parent))
+    off.end()
+    monkeypatch.setattr(_processors, "_ever_attached", True)
+    on = tracer.start_span("chat on", context=trace.set_span_in_context(parent))
+    on.end()
+    parent.end()
+    provider.force_flush()
+
+    spans = {span.name: (span.attributes or {}) for span in exporter.get_finished_spans()}
+    assert "convergent.attributes.customer.id" not in spans["chat off"]
+    assert spans["chat on"]["convergent.attributes.customer.id"] == "acme"
+
+
 def test_every_context_pair_is_stamped_filters_or_not() -> None:
     """The stamper copies every pair, and it runs with no filter configured, so
     ``context_attributes=`` annotates spans on its own."""
@@ -497,9 +699,11 @@ def test_interleaved_generators_leave_no_mark_behind(
 ) -> None:
     """Two decorated generators drained in creation order detach their context
     tokens out of order, and ``context.detach`` then restores a context that
-    still names the first generator's mark. The liveness guard makes that
-    stale mark read as no mark: after both drain, the context carries no
-    pairs, and a later unrelated span is withheld under require_span_attributes=."""
+    still names the first generator's scope. The liveness guard makes that
+    stale scope read as no live values -- after both drain, the context
+    carries no pairs -- and a later span under the stale context inherits its
+    recorded parent span's stamps, never the stale scope's values. The stamps
+    always agree with the parentage."""
     exporter = start_sdk(require_span_attributes={"customer.id": ["acme", "initech"]})
     provider = _core.active_provider()
     assert provider is not None
@@ -534,7 +738,21 @@ def test_interleaved_generators_leave_no_mark_behind(
     # other tests. The guard under test is about the mark, which the
     # assertions above read from inside the same context.
     contextvars.copy_context().run(drive)
-    assert "after the generators" not in _names(exporter)
+    after = _span_named(exporter, "after the generators")
+    stamped = (after.attributes or {}).get("convergent.attributes.customer.id")
+    if after.parent is None:
+        assert stamped is None, "no parent, nothing to inherit"
+    else:
+        parent_id = after.parent.span_id
+        parent = next(
+            s
+            for s in exporter.get_finished_spans()
+            if s.context is not None and s.context.span_id == parent_id
+        )
+        assert stamped == (parent.attributes or {})["convergent.attributes.customer.id"], (
+            "a span under a stale context carries its recorded parent's stamps, "
+            "never the stale scope's values"
+        )
 
 
 def test_a_suspended_generators_mark_stays_attached_until_its_block_exits(

@@ -4,6 +4,17 @@ Each released version has a `## <version>` section here, and the release
 workflow publishes that section as the GitHub Release notes. The newest
 section may describe a version whose tag does not exist yet.
 
+## 0.0.7
+
+- Every span now inherits its parent span's `context_attributes=` pairs. A
+  span that starts on another thread, or from a context saved earlier, still
+  carries the run's attributes. `require_span_attributes=` keeps a whole run
+  and `reject_span_attributes=` withholds a whole run, library spans included.
+- A span's own `context_attributes=` adds pairs and wins for a key both hold.
+  Its descendants follow the override.
+- The deployment registration warning names the endpoint's scheme and host, so
+  an endpoint the environment changed is visible in one line.
+
 ## 0.0.6
 
 - `Status` echoes the running filter policy in `require_span_attributes` and
