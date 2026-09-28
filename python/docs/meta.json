@@ -1,12 +1,11 @@
 {
   "title": "Python SDK",
-  "root": true,
   "pages": [
     "index",
     "agent-skill",
-    "instrument",
-    "integrations",
     "opentelemetry",
+    "integrations",
+    "instrument",
     "---Reference---",
     "configuration",
     "reference/api",

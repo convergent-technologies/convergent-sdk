@@ -3,26 +3,19 @@ title: Get started
 description: Install the SDK, set your key, and instrument your agent with the coding-agent skills.
 ---
 
-The SDK's source, skills, and examples live at
-[github.com/convergent-technologies/convergent-sdk](https://github.com/convergent-technologies/convergent-sdk).
-If a coding agent is doing the instrumentation, point it at that repository
-first; the prompts below do exactly that.
-
 ## Install
 
 ```bash
 pip install convergent-sdk
 ```
 
-In a project that pins its dependencies, use `convergent-sdk>=0.0.4,<0.1`.
-While the SDK is on 0.x, a minor release may change the public API, and the
-upper bound keeps such a release out of a routine dependency update.
-[Stability](stability.md) states the full policy.
+[Stability](stability.md) states the version policy.
 
 ## Set your key
 
-Mint an ingestion key at
-[app.convergent.dev/workspace/settings](https://app.convergent.dev/workspace/settings).
+1. Mint an ingestion key at
+   [app.convergent.dev/workspace/settings](https://app.convergent.dev/workspace/settings).
+2. Export it:
 
 ```bash
 export CONVERGENT_API_KEY="cvk_xxxxxxxxxxxxxxxx"
@@ -31,13 +24,23 @@ export CONVERGENT_API_KEY="cvk_xxxxxxxxxxxxxxxx"
 export GIT_SHA=$(git rev-parse --short HEAD)
 ```
 
-`CONVERGENT_API_KEY` is required. The export works for local development. In a deployment, you'll want the key wherever you store secrets or your environment variables.
+Both are environment variables, and they must be set in the environment that
+runs your agent. The export works for local development. In a deployment, put
+them where you store your other secrets or environment variables.
 
-`GIT_SHA` is an example environment variable name you can use to describe a release when initializing convergent with: `init(release=...)`. Note that describing a release is optional.
+`init()` needs `CONVERGENT_API_KEY`, or a `File()` destination when you record
+locally instead. `GIT_SHA` is an example environment variable name you can use
+to describe a release with `init(release=...)`. Describing a release is
+optional.
 
 ## Instrument with a coding agent
 
-If you're instrumenting Convergent for the first time, the fastest way to do so is give your coding agent this prompt.
+Two portable skills do the work: `convergent-instrument` adds tracing, and
+`convergent-verify` inspects the recording. Your coding agent installs both from
+the SDK repository. This works with Claude Code and Codex.
+
+From the root of your repository, give your coding agent this prompt. Fill in
+the agent to instrument and one representative run:
 
 ```text
 Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
@@ -48,7 +51,12 @@ Agent to instrument: <file or directory>
 Representative run: <command or instructions that run the agent>
 ```
 
-If you've already instrumented with Convergent, and are just looking to verify your setup, give your coding agent this prompt:
+The agent instruments your code, runs the command, and inspects the recording.
+It repeats until the recording has no unresolved instrumentation issue.
+
+To check an existing setup, ask the agent to use `convergent-verify` on a
+recording. It reports findings and changes no code. This prompt starts that
+check directly:
 
 ```text
 Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
@@ -59,19 +67,6 @@ Agent to verify: <file or directory that is already instrumented>
 Representative run: <command or instructions that run the agent>
 ```
 
-Alternatively, you can also install the skills directly in your coding agent using:
-
-```bash
-npx skills add convergent-technologies/convergent-sdk
-```
-
-You'll have to restart your coding agent session to use the skills directly, but can do so with slash commands:
-
-```
-/convergent-instrument
-/convergent-verify
-```
-
 [Instrument with a coding agent](agent-skill.md) describes what each skill does.
 
 ## Example: Trace a run
@@ -79,6 +74,9 @@ You'll have to restart your coding agent session to use the skills directly, but
 Call `init()` once at startup, and put `agent()` on the function that handles one request.
 The model call inside it is the one your app already makes, and this one is the OpenAI
 client. Save it as `app.py`.
+
+`release` names the deployed version, so recordings group by release. Pass any
+string, or set `CONVERGENT_RELEASE` and drop the argument.
 
 ```python
 import os
@@ -128,16 +126,16 @@ trace keeps the same shape.
 
 ## The rest of this documentation
 
-[Instrument](instrument.md) covers confirming a run arrived with `check()` and
-instrumenting your agent by hand. [OpenTelemetry](opentelemetry.md) covers
-attaching to an existing OpenTelemetry setup and the `agents`, `require_span_attributes`, and
-`reject_span_attributes` filters, and [Integrations](integrations/index.md)
-the integration packages. The reference section holds
-[configuration](configuration.md), the [API reference](reference/api.md), the
-[attribute spellings Convergent reads](reference/attributes.md), and
-[troubleshooting](troubleshooting.md).
+- [Instrument with a coding agent](agent-skill.md): what the skills do.
+- [Already using OpenTelemetry](opentelemetry.md): attach to an existing OpenTelemetry setup and filter spans.
+- [Integrations](integrations/index.md): the integration packages.
+- [Instrument](instrument.md): confirm a run arrived with `check()`, and instrument by hand.
+- [Configuration](configuration.md): every argument and environment variable.
+- [API reference](reference/api.md): every public function.
+- [Attribute support](reference/attributes.md): the attribute spellings Convergent reads.
+- [Troubleshooting](troubleshooting.md): what to do when a run does not arrive.
 
-The [GitHub repository](https://github.com/convergent-technologies/convergent-sdk)
-holds the skills from the coding-agent section above and runnable examples: the
-run above as a self-contained file that needs no OpenAI key, and one trace
-recorded across a dispatcher and three worker processes.
+The [SDK repository](https://github.com/convergent-technologies/convergent-sdk)
+holds the source and runnable examples: the run above as a self-contained file
+that needs no OpenAI key, and one trace recorded across a dispatcher and three
+worker processes.

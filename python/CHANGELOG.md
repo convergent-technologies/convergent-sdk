@@ -4,6 +4,33 @@ Each released version has a `## <version>` section here, and the release
 workflow publishes that section as the GitHub Release notes. The newest
 section may describe a version whose tag does not exist yet.
 
+## 0.0.9
+
+- Spans upload with `opentelemetry-exporter-otlp-proto-http` 1.45 and later.
+  Earlier SDK versions installed with that exporter sent nothing and logged
+  `'AuthRejectingSession' object has no attribute 'request'` on every batch.
+- `agent()` accepts `model`, `system_instructions`, and `tools` to record the
+  agent's configuration on its run span. `span()` and `observe()` accept the
+  same arguments for `agent_run` and `invoke_agent` operations.
+- `session(session_id)` scopes `convergent.session.id` across SDK and library
+  spans in one process. Nested scopes restore the outer id, and asyncio tasks
+  inherit it while the session block is open. A span's existing string-valued
+  id wins. Surrounding whitespace is removed and invalid values are logged without interrupting
+  the application. The id is not added to OpenTelemetry baggage.
+- `session.id` and `gen_ai.conversation.id` are recorded as set. Earlier
+  versions replaced `session.id` with `gen_ai.conversation.id` and added
+  `convergent.session.id`. Ingest reads every spelling.
+- `context_attributes` and `set_context_attributes()` reject the session keys
+  `convergent.session.id`, `gen_ai.conversation.id`, and `session.id`.
+  Rename the context key and its matching require or reject filter together,
+  then use `session()` for grouping. This is a patch-release compatibility
+  exception; see [Upgrading from 0.0.8](docs/stability.md#upgrading-from-008).
+- Bundled coding-agent skills work without the Convergent CLI or hosted login.
+  The recording reader recognizes session IDs and reports release fields
+  separately from producer-supplied agent versions.
+- A [sessions example](examples/sessions/) records two concurrent conversations
+  with two turns each and both SDK and OpenTelemetry child spans.
+
 ## 0.0.8
 
 - `context_attributes=` on `agent()`, `tool()`, and `observe()` also takes a

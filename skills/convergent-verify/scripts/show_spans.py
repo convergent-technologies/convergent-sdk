@@ -44,6 +44,8 @@ SUMMARY_KEYS = {
         "gen_ai.agent.name",
         "gen_ai.agent.version",
         "gen_ai.conversation.id",
+        "convergent.session.id",
+        "session.id",
     ),
     MODEL_CALL: (
         "gen_ai.request.model",
@@ -234,7 +236,12 @@ def _summary(span: Span) -> str:
     parts: list[str] = []
     for key in SUMMARY_KEYS.get(span.role, ()):
         value = span.attributes.get(key)
-        label = key.removeprefix("gen_ai.")
+        if key in {"gen_ai.conversation.id", "convergent.session.id", "session.id"}:
+            if value is None:
+                continue
+            label = key
+        else:
+            label = key.removeprefix("gen_ai.")
         parts.append(f"{label}={_clip(value)}" if value is not None else f"{label}=MISSING")
     for key in sorted(span.attributes):
         if key.startswith(MARK_PREFIX):
@@ -257,17 +264,15 @@ def counts(spans: list[Span], total: int) -> list[str]:
         if "gen_ai.usage.input_tokens" in span.attributes
         or "gen_ai.usage.output_tokens" in span.attributes
     )
-    releases = sorted(
-        {
-            value
-            for span in spans
-            for value in (
-                span.attributes.get("gen_ai.agent.version"),
-                span.resource.get("service.version"),
-            )
-            if isinstance(value, str) and value
-        }
-    )
+    release_fields: set[str] = set()
+    for span in spans:
+        for attributes, key in (
+            (span.resource, "service.version"),
+            (span.attributes, "convergent.release"),
+        ):
+            value = attributes.get(key)
+            if isinstance(value, str) and value:
+                release_fields.add(f"{key}={_clip(value)}")
     marks = Counter(
         f"{key.removeprefix(MARK_PREFIX)}={_clip(value)}"
         for span in spans
@@ -283,7 +288,7 @@ def counts(spans: list[Span], total: int) -> list[str]:
         f"model calls: {roles[MODEL_CALL]}",
         f"model calls with token usage: {with_usage}",
         f"tool calls: {roles[TOOL_CALL]}",
-        "releases: " + (", ".join(_clip(release) for release in releases) if releases else "none"),
+        "release fields: " + (", ".join(sorted(release_fields)) if release_fields else "none"),
         "context attributes: "
         + (
             ", ".join(f"{mark} ({count} spans)" for mark, count in sorted(marks.items()))

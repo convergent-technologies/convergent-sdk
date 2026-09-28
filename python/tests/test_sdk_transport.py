@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import http.server
 import logging
+import threading
 from collections.abc import Iterator, Sequence
-from types import SimpleNamespace
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
 from opentelemetry import trace
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import (
-    BatchSpanProcessor,
     SimpleSpanProcessor,
     SpanExporter,
     SpanExportResult,
@@ -182,8 +185,8 @@ def test_nested_agents_share_one_execution_and_get_the_release_stamped(
     )
 
     @retro.tool_plain
-    def get_team_standup() -> str:
-        return standup.run_sync("write a stand-up").output
+    async def get_team_standup() -> str:
+        return (await standup.run("write a stand-up")).output
 
     @convergent.observe(name="weekly-retro-agent", operation="agent_run")
     def run() -> None:
@@ -286,49 +289,45 @@ def test_flush_reports_whether_the_export_delivered(
     assert result.dropped == expected_dropped
 
 
-@pytest.mark.parametrize("status_code", [401, 403])
-def test_flush_counts_the_batches_rejected_credentials_lose(
-    status_code: int,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Once the collector rejects the key, the session answers the exporter with
-    a success so nothing retries -- and ``flush()`` must still report the refused
-    batch and every batch withheld after it, or ``assert flush().ok`` in CI
-    passes on a setup that delivers nothing."""
+@contextmanager
+def _collector(status: int) -> Iterator[_Collector]:
+    collector = _Collector(status)
+    try:
+        yield collector
+    finally:
+        collector.close()
 
-    class Session:
-        headers: dict[str, str] = {}
 
-        def post(self, **_: object) -> SimpleNamespace:
-            return SimpleNamespace(ok=False, status_code=status_code, reason="rejected")
+class _Collector:
+    """A local receiver that answers every span batch with one status code."""
 
-        def close(self) -> None:
-            pass
+    def __init__(self, status: int) -> None:
+        self.batches: list[tuple[str, dict[str, str], bytes]] = []
+        batches = self.batches
 
-    guard = _transport.AuthRejectingSession(Session())
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                batches.append((self.path, dict(self.headers), body))
+                self.send_response(status)
+                self.end_headers()
 
-    class Exporter(SpanExporter):
-        """The OTLP exporter's shape: believes the session's response."""
+            def log_message(self, *_: object) -> None: ...
 
-        def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-            response = guard.post(url="https://collector.test/v1/traces")
-            return SpanExportResult.SUCCESS if response.ok else SpanExportResult.FAILURE
+        self._server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        self.endpoint = f"http://127.0.0.1:{self._server.server_port}"
 
-        def shutdown(self) -> None: ...
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
 
-        def force_flush(self, timeout_millis: int = 30_000) -> bool:
-            return True
 
-    monkeypatch.setattr(
-        _transport,
-        "build_processor",
-        lambda **_: _transport.batch_processor(Exporter(), rejected=guard.is_rejected),
-    )
-    with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
+def test_a_recorded_span_reaches_the_collector() -> None:
+    with _collector(200) as collector:
         convergent.init(
             api_key="key",  # pragma: allowlist secret
-            endpoint="https://example.test",
+            endpoint=collector.endpoint,
             release="r1",
         )
 
@@ -336,33 +335,46 @@ def test_flush_counts_the_batches_rejected_credentials_lose(
         def work() -> None: ...
 
         work()
-        refused = convergent.flush(timeout_ms=2_000)
+        result = convergent.flush(timeout_ms=5_000)
+
+    assert (result.ok, result.dropped) == (True, 0)
+    ((path, headers, body),) = collector.batches
+    assert path == "/v1/traces"
+    assert headers["Authorization"] == "Bearer key"
+    request = ExportTraceServiceRequest.FromString(gzip.decompress(body))
+    assert [
+        span.name
+        for resource in request.resource_spans
+        for scope in resource.scope_spans
+        for span in scope.spans
+    ] == ["invoke_agent job"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_rejected_key_stops_sending_and_flush_reports_the_loss(
+    status: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The refused batch and every batch withheld after it land in ``dropped``,
+    or ``assert flush().ok`` in CI passes on a setup that delivers nothing."""
+    with _collector(status) as collector, caplog.at_level(logging.WARNING, logger="convergent.sdk"):
+        convergent.init(
+            api_key="key",  # pragma: allowlist secret
+            endpoint=collector.endpoint,
+            release="r1",
+        )
+
+        @convergent.observe(name="job", operation="agent_run")
+        def work() -> None: ...
+
         work()
-        withheld = convergent.flush(timeout_ms=2_000)
+        refused = convergent.flush(timeout_ms=5_000)
+        work()
+        withheld = convergent.flush(timeout_ms=5_000)
 
     assert (refused.ok, refused.dropped) == (False, 1)
     assert (withheld.ok, withheld.dropped) == (False, 1)
-    assert "rejected its credentials" in caplog.text
-
-
-def test_build_processor_wires_the_sessions_rejection_into_the_loss_counter() -> None:
-    """The e2e test above builds its own processor, so this is what holds the
-    real ``build_processor`` to the same wiring."""
-    processor = _transport.build_processor(api_key="k", endpoint="https://collector.test")
-
-    assert isinstance(processor, BatchSpanProcessor)
-    exporter = processor.span_exporter
-    assert isinstance(exporter, _transport._LossCountingExporter)
-    assert (
-        getattr(exporter._rejected, "__func__", None) is _transport.AuthRejectingSession.is_rejected
-    )
-    # The session the counter asks is the one the exporter posts through, not
-    # merely some AuthRejectingSession.
-    assert getattr(exporter._rejected, "__self__", None) is getattr(
-        exporter._exporter, "_session", None
-    )
-
-    processor.shutdown()
+    assert len(collector.batches) == 1, "nothing is sent after the key is rejected"
+    assert caplog.text.count("rejected its credentials") == 1
 
 
 def test_exporter_setup_failure_disables_tracing(
@@ -405,82 +417,6 @@ def test_init_identity_has_no_execution_resource_attribute(
     assert "convergent.agent.name" not in resource
     assert resource["service.version"] == "a01dbef"
     assert "convergent.execution.id" not in resource
-
-
-@pytest.mark.parametrize("status_code", [401, 403])
-def test_auth_rejection_logs_once_and_stops_later_requests(
-    status_code: int,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    responses = 0
-
-    class Session:
-        headers: dict[str, str] = {}
-
-        def post(self, **_: object) -> SimpleNamespace:
-            nonlocal responses
-            responses += 1
-            return SimpleNamespace(ok=False, status_code=status_code, reason="rejected")
-
-        def close(self) -> None:
-            pass
-
-    session = _transport.AuthRejectingSession(Session())
-    with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
-        assert session.post(url="https://example.test").ok is True
-        assert session.post(url="https://example.test").ok is True
-
-    assert responses == 1
-    messages = [
-        record.message for record in caplog.records if record.name.startswith("convergent.sdk")
-    ]
-    assert len(messages) == 1
-
-
-def test_content_too_large_logs_once_and_keeps_sending(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    responses = 0
-
-    class Session:
-        headers: dict[str, str] = {}
-
-        def post(self, **_: object) -> SimpleNamespace:
-            nonlocal responses
-            responses += 1
-            return SimpleNamespace(ok=False, status_code=413, reason="too large")
-
-        def close(self) -> None:
-            pass
-
-    session = _transport.AuthRejectingSession(Session())
-    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
-        assert session.post(url="https://example.test").status_code == 413
-        assert session.post(url="https://example.test").status_code == 413
-
-    messages = [
-        record.message for record in caplog.records if record.name.startswith("convergent.sdk")
-    ]
-    assert responses == 2
-    assert len(messages) == 1
-    assert "lost a span batch" in messages[0]
-    assert "OTEL_BSP_MAX_EXPORT_BATCH_SIZE" in messages[0], "the advice must be actionable"
-
-
-def test_auth_rejecting_session_forwards_positional_post_args() -> None:
-    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-
-    class Session:
-        headers: dict[str, str] = {}
-
-        def post(self, *args: object, **kwargs: object) -> SimpleNamespace:
-            calls.append((args, kwargs))
-            return SimpleNamespace(ok=True, status_code=200, reason="ok")
-
-    session = _transport.AuthRejectingSession(Session())
-    session.post("https://example.test", data=b"payload")
-
-    assert calls == [(("https://example.test",), {"data": b"payload"})]
 
 
 def test_the_exporter_compresses_by_default() -> None:

@@ -11,6 +11,7 @@ EXPECTED = [
     "init",
     "check",
     "observe",
+    "session",
     # Decorator aliases for the two operations nearly every integration writes.
     # agent(name) keeps the name explicit; tool() may take it from __name__.
     "agent",

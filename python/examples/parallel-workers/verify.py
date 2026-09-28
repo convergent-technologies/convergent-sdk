@@ -100,7 +100,7 @@ def main(argv: list[str]) -> int:
     show_spans = load_show_spans()
     spans = read(show_spans, spans_dir)
     print("recording:")
-    for line in show_spans.counts(spans):
+    for line in show_spans.counts(spans, total=len(spans)):
         print("  " + line)
 
     found = problems(spans)

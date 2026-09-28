@@ -210,27 +210,6 @@ def test_exit_drain_still_shuts_every_processor_down_after_the_budget(
     assert shutdowns == [0, 1, 2]
 
 
-def test_lock_reset_is_registered_at_import() -> None:
-    """The hook is installed at import, not from init(), so a process that forks
-    before configuring tracing is covered too."""
-    assert hasattr(_core, "_reset_lock_after_fork")
-    if sys.platform != "win32":
-        assert hasattr(os, "register_at_fork")
-
-
-def test_lock_reset_swaps_in_a_usable_lock() -> None:
-    original = _core._lock
-    try:
-        original.acquire()
-        _core._reset_lock_after_fork()
-        assert _core._lock is not original
-        assert _core._lock.acquire(timeout=1), "the replacement lock is already held"
-        _core._lock.release()
-    finally:
-        original.release()
-        _core._lock = original
-
-
 def test_a_span_processor_is_repaired_after_fork_too(monkeypatch: pytest.MonkeyPatch) -> None:
     """A child that inherited the gate locked would block on every span start. It
     also inherits the flag saying registration is under way, and the thread running

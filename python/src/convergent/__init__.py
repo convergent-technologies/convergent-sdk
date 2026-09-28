@@ -23,6 +23,7 @@ from ._semantic import (
     current_span,
     current_trace,
     observe,
+    session,
     span,
     tool,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "init",
     "check",
     "observe",
+    "session",
     "agent",
     "tool",
     "span",
