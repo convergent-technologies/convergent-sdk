@@ -3,179 +3,332 @@ title: Instrument
 description: Mark the agent run, the tool calls, and the steps in between.
 ---
 
-Four calls open spans: `agent()` for one agent run, `tool()` for one tool call,
-and `span()` and `observe()` for the steps in between. `init()` configures where
-those spans go. The SDK ships an agent skill that helps a coding agent do this
-instrumentation; see [Instrument with a coding agent](agent-skill.md).
+The snippets on this page assume tracing is already configured.
+Use `agent()` for an agent run, `tool()` for a tool call, and `span()` or
+`observe()` for other steps. Call `init()` before recording spans. See
+[Get started](index.md) for setup and
+[Instrument with a coding agent](agent-skill.md) for the coding-agent workflow.
 
 ## Mark the agent run
 
-`agent()` records one run of one agent. Put it on the function that handles a
-single request.
+Put `agent()` on the function that handles one request. Give it a stable name.
 
 ```python
-@convergent.agent(name="convergent-demo")
+@convergent.agent(name="support-agent")
 def answer(question: str) -> str:
-    ...
-```
-
-The name is the agent's identity in your workspace. Keep it stable, like a class
-name. `"convergent-demo"` works; `f"convergent-demo-{user_id}"` gives you one agent
-per user and nothing to compare across runs. Put the varying part in
-`attributes`.
-
-```python
-@convergent.agent(name="convergent-demo", attributes={"tier": "enterprise"})
-def answer(question: str) -> str:
-    ...
-```
-
-`attributes` lands on the run span alone. To put a key on the run and on every
-span inside it — which is what the [span filters](reference/api.md#span-filters)
-read first — pass `context_attributes=`. When the value varies per request, pass
-a callable instead of the mapping. The SDK calls it on every call, with the
-decorated function's arguments bound to their parameter names. Name the
-parameters you need and absorb the rest with `**_`.
-
-```python
-@convergent.agent(
-    name="support-agent",
-    context_attributes=lambda customer_id, **_: {"customer.id": customer_id},
-)
-def handle(customer_id: str, ticket: str) -> str:
-    ...
-```
-
-`span()` takes the mapping form only. Its block runs inside the request, so build the mapping there:
-
-```python
-with convergent.span(
-    name="support-agent",
-    operation="agent_run",
-    context_attributes={"customer.id": customer_id},
-):
-    ...
-```
-
-## Mark the tool calls
-
-`tool()` records one tool call. Left without a name it takes the function's own
-name, which is already a stable identity.
-
-```python
-@convergent.tool()
-def lookup_invoice(invoice_id: str) -> dict:
-    ...
-```
-
-Write it as `@convergent.tool()` with the parentheses. The bare `@convergent.tool`
-form is not supported.
-
-## Mark everything else
-
-`span()` wraps a block and hands you a handle. `observe()` is the decorator form
-of the same thing, and works on plain functions, coroutines, generators, and
-async generators. Both take an `operation`, and `agent_run`, `model_call`, and
-`tool_call` are the three the workspace renders as their own kind of step.
-
-```python
-with convergent.span(name="convergent-demo", operation="agent_run"):
-    with convergent.span(name="gpt-5.5", operation="model_call"):
-        reply = respond(question)
-
-
-@convergent.observe(name="lookup_invoice", operation="tool_call")
-def lookup_invoice(invoice_id: str) -> dict:
-    ...
-```
-
-An `agent_run` is the run itself, and `agent()` writes one. A `model_call` shows
-the prompt, the response, the model, and the token counts. A `tool_call` shows
-the arguments and the result, and `tool()` writes one. `text_completion` and
-`generate_content` render the way a `model_call` does.
-
-Any other operation, `retrieval` or `workflow` or a name of your own such as
-`guardrail_check`, is recorded exactly as you wrote it and shows with an
-unknown rendering.
-
-One operation name is never read as another. `toolcall` and `tool` stay the words
-you wrote and are not filed under `tool_call`.
-
-## Record what went in and out
-
-`set_input()` and `set_output()` record the prompt and the answer. The variable
-in `with convergent.span(...) as call` is what you call them on.
-
-```python
-with convergent.span(name="gpt-5.5", operation="model_call") as call:
-    call.set_input(question)
-    reply = respond(question)
-    call.set_output(reply)
-```
-
-A value that is already a list of message dictionaries goes through untouched.
-Anything else becomes the text content of one message.
-
-The handle also carries its own trace id, so a log line can point at the trace it
-came from with `logger.info("calling model  trace=%s", call.trace_id)`. Outside a
-`with` block, `convergent.current_trace()` gives the same ids for whatever span is
-active, or `None` when there is none.
-
-## Get the current span
-
-`current_span()` is how a decorated function reaches its own span to record what
-went in and out and to set attributes, because a decorator hands the function no
-variable.
-
-```python
-@convergent.agent(name="convergent-demo")
-def answer(question: str, tier: str) -> str:
     run = convergent.current_span()
     run.set_input(question)
-    run.set_attribute("tier", tier)
-    reply = respond(question)
+    reply = "A support specialist will follow up."
     run.set_output(reply)
     return reply
 ```
 
-The decorator's own `attributes` takes values you know when you write the code.
-`set_attribute()` takes the ones you only know at runtime. Both land on that one
-span and neither reaches a child span, so the
-[span filters](reference/api.md#span-filters) cannot use them to keep or exclude
-a whole run. Pass `context_attributes=` for that; see
-[Mark the agent run](#mark-the-agent-run).
+Calling `answer("Where is my order?")` returns
+`"A support specialist will follow up."` and records a span named
+`invoke_agent support-agent` with those input and output messages. The agent name is `support-agent` on every call.
+A name such as `f"support-agent-{user_id}"` creates a separate agent for each
+user. Put values that change per request in attributes instead.
 
-Call it anywhere without guarding it. Outside a span, or before `init()`, it
-hands back an object whose methods do nothing.
+```python
+@convergent.agent(
+    name="support-agent",
+    attributes={"team": "support"},
+    context_attributes=lambda customer_id, **_: {"customer.id": customer_id},
+)
+def handle(customer_id: str, ticket: str) -> str:
+    return "A support specialist will follow up."
+```
+
+For `handle("acme", "Order 42 is late")`, the run records custom attribute
+`team="support"`. The run and every span started inside it record
+`customer.id="acme"`. The callable receives arguments by parameter name; use
+`**_` for arguments it does not need. A mapping also works when values are
+already known.
+
+`attributes` affects one span. `context_attributes` also reaches child spans
+from instrumented libraries using the configured provider. It supplies the
+context attributes used by [span filters](reference/api.md#span-filters). Nested contexts
+use the inner value when both set a key. These values remain in the process;
+the SDK does not send them as OpenTelemetry baggage.
+
+The SDK rejects custom keys starting with `convergent.`. Use ordinary keys
+such as `team` or `acme.prompt_revision`. The receiver's custom-key rules are
+in [Custom attributes](reference/attributes.md#custom-attributes).
+
+### Describe the agent configuration
+
+Pass `model`, `system_instructions`, and `tools` to describe the configured
+agent. These arguments record metadata; they do not configure a model client
+or call a tool.
+
+```python
+@convergent.agent(
+    name="support-agent",
+    model="gpt-4o",
+    system_instructions="Look up the order before answering.",
+    tools=[
+        {
+            "name": "lookup_order",
+            "description": "Fetch one order by ID.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string"}},
+                "required": ["order_id"],
+            },
+        },
+    ],
+)
+def handle(ticket: str) -> str:
+    return "A support specialist will follow up."
+```
+
+The run records model `gpt-4o`, the supplied instructions, and one tool
+definition. These values belong to the agent run. Convergent does not fill
+missing agent configuration from child model calls.
+
+For example, if the run omits `model` and a child reports model `gpt-4o-mini`, the
+agent's model remains absent. The child still records its own model.
+
+`span()` and `observe()` accept the same three arguments for
+`operation="agent_run"` or `operation="invoke_agent"`. On another operation,
+the SDK ignores these arguments and logs the reason. To describe a model
+call, use model-call attributes such as `gen_ai.request.model`.
+
+### Agent configuration attributes
+
+Convergent reads the agent run's attributes in the order below. The
+[attribute reference](reference/attributes.md#attribute-precedence) describes
+how Convergent selects and checks values.
+The SDK arguments write `convergent.agent.model`,
+`convergent.agent.system_instructions`, and `convergent.agent.tools`.
+These take priority on agent runs. An invalid earlier value blocks later
+direct aliases.
+
+Read the numbered entries for each field from top to bottom.
+
+| Field | Order | Attribute or event |
+| --- | --- | --- |
+| Model | 1 | `convergent.agent.model` |
+| | 2 | `convergent.request_model` |
+| | 3 | `gen_ai.request.model` |
+| | 4 | `model_name` from a matching `pydantic-ai` tracer |
+| | 5 | `llm.model_name` |
+| System instructions | 1 | `convergent.agent.system_instructions` |
+| | 2 | `convergent.system_instructions` |
+| | 3 | `gen_ai.system_instructions` |
+| | 4 | `gen_ai.system.message` event content from a matching `pydantic-ai` tracer |
+| Tools | 1 | `convergent.agent.tools` |
+| | 2 | `convergent.tool_definitions` |
+| | 3 | `gen_ai.tool.definitions` |
+
+A matching tracer is named `pydantic_ai`, `pydantic-ai`, or a dotted child of
+either name. The event and `model_name` rules only supply non-null values.
+Direct attributes from the table work with any tracer.
+
+For example, an agent run with `convergent.agent.model=" "` and
+`gen_ai.request.model="gpt-4o"` has no recorded model. The first value
+is present but blank. A valid value `" gpt-4o "` keeps its surrounding spaces.
+
+See [System instructions](reference/attributes.md#system-instructions) for
+accepted text, message lists, and invalid input.
+
+## Mark the tool calls
+
+`tool()` records one tool call. Without a name, it uses the function's name.
+Record arguments and results explicitly.
+
+```python
+@convergent.tool()
+def lookup_order(order_id: str) -> dict:
+    call = convergent.current_span()
+    call.set_input({"order_id": order_id})
+    result = {"order_id": order_id, "status": "shipped"}
+    call.set_output(result)
+    return result
+```
+
+`lookup_order("42")` records `execute_tool lookup_order`. Its arguments and
+result are JSON strings for the two objects above. It does not create an agent
+run. When called inside one, it becomes a child span.
+
+If the model supplied a tool call ID, use `call.set_tool_call_id(call_id)` to
+connect the model's request to this call. Write `@convergent.tool()` with
+parentheses; bare `@convergent.tool` is not supported.
+
+## Mark everything else
+
+`span()` records a block. `observe()` records each call of a function. The
+decorator supports ordinary functions, coroutines, generators, and async
+generators.
+
+```python
+with convergent.span(
+    name="answer",
+    operation="model_call",
+    attributes={"gen_ai.request.model": "gpt-4o"},
+) as call:
+    call.set_input("Hello")
+    reply = "Hello. How can I help?"
+    call.set_output(reply)
+```
+
+This records one model-call span named `answer`, requested model `gpt-4o`,
+one user message, and one assistant message. It does not call a model.
+
+`agent_run`, `model_call`, and `tool_call` record agent, model, and tool spans.
+`text_completion` and `generate_content` also record model spans. Other
+operations, such as `retrieval` or `guardrail_check`, record generic steps.
+The [operation reference](reference/api.md#operations) lists the exact emitted
+values and span names.
+
+## Record what went in and out
+
+Use a span handle's `set_input()` and `set_output()` methods. Except on tool
+calls, a nonempty list of dictionaries, each with a `role` key, becomes a
+JSON message list. Other values become the content of one user or assistant text message.
+
+| Call | Emitted value |
+| --- | --- |
+| `call.set_input("Hello")` on a model or agent run | `gen_ai.input.messages`: one user message whose text is `Hello`. |
+| `call.set_output("Hi")` on a model or agent run | `gen_ai.output.messages`: one assistant message whose text is `Hi`. |
+| `call.set_input({"order_id":"42"})` on a tool call | `gen_ai.tool.call.arguments` contains the string `{"order_id":"42"}`. |
+| `call.set_output({"status":"shipped"})` on a tool call | `gen_ai.tool.call.result` contains the string `{"status":"shipped"}`. |
+
+For `call.set_input("Hello")`, the SDK writes this list as compact JSON text
+in `gen_ai.input.messages`:
+
+```json
+[
+  {
+    "role": "user",
+    "parts": [
+      {"type": "text", "content": "Hello"}
+    ]
+  }
+]
+```
+
+`set_input([])` records one user message whose text is `[]`; it does not
+record an empty message list.
+
+For general operations, these methods still emit message attributes. Whether
+they become messages or custom attributes depends on the
+[span kind](reference/attributes.md#fields-kept-for-each-span-kind).
+
+## Get the current span
+
+`current_span()` returns a handle for the active span. Use it inside a
+decorated function, which receives no handle from the decorator.
+
+```python
+@convergent.agent(name="support-agent")
+def answer(question: str, tier: str) -> str:
+    run = convergent.current_span()
+    run.set_input(question)
+    run.set_attribute("tier", tier)
+    reply = "A support specialist will follow up."
+    run.set_output(reply)
+    return reply
+```
+
+`answer("Order 42 is late", "enterprise")` records the question, the reply,
+and custom attribute `tier="enterprise"` on the run. Child spans do not
+inherit a value set with `set_attribute()`. Use `context_attributes` or
+`set_context_attributes()` when children and span filters need the value.
+
+A handle has `trace_id` and `span_id` for log correlation. `current_trace()`
+returns those IDs for the active span, or `None` when none is active.
+`current_span()` always returns a handle. Its recording methods do nothing
+before tracing is configured or when there is no active span.
 
 ## Link the turns of a conversation
 
-A multi-turn agent opens a new run for each turn, and each run is its own trace.
-`gen_ai.conversation.id` holds the id that ties those turns together. Set it on
-the agent span, with the same value on every turn.
+Use your application's conversation or thread ID to group runs. A session
+does not open a span or force runs into one trace.
 
 ```python
-@convergent.agent(name="convergent-demo")
-def answer(question: str, conversation_id: str) -> str:
-    run = convergent.current_span()
-    run.set_attribute("gen_ai.conversation.id", conversation_id)
-    ...
+with convergent.session("conversation-42"):
+    answer("Where is my order?", "enterprise")
+    answer("Can I change the address?", "enterprise")
 ```
 
-Use the id your application already has for the thread, such as a chat session
-id, a support ticket number, or a Slack thread key. Values look like
-`conv_5j66UpCpwteGg4YSxUnt7lPY`.
+With no enclosing active span, these calls create separate traces. Both carry
+session ID `conversation-42`. The session also sets the ID on spans from instrumented
+libraries using the configured provider.
 
-The industry uses two names for this id. The OpenTelemetry GenAI conventions
-call it `gen_ai.conversation.id` and OpenInference calls it `session.id`.
-Convergent reads both. Setting either one through the SDK writes
-`gen_ai.conversation.id` and Convergent's own `convergent.session.id`, and a
-trace that arrives with either industry name gets `convergent.session.id`
-added. A framework you hand a conversation id to writes one of the two names
-itself, and that is enough.
+The `python/examples/sessions` example in the
+[public SDK repository](https://github.com/convergent-technologies/convergent-sdk)
+records two concurrent conversations with two turns each, SDK tool spans, and
+OpenTelemetry child spans. It requires SDK 0.0.9 or newer and no credentials.
 
-> **Note:** The traces list reads this attribute. A trace that carries it shows a Conversation
-> value, and opening that value filters the list down to the turns that share the id.
+`session()` trims surrounding whitespace and accepts 1 to 128 characters.
+`session(" conversation-42 ")` therefore records `conversation-42`. An invalid
+ID, such as `" "` or `42`, logs once and runs the block without adding a new
+session ID. If an outer session exists, it remains active.
+
+Nested sessions use the innermost ID, then restore the outer ID. A span that
+already has a string-valued `convergent.session.id` at start keeps that value,
+even if the string is invalid for ingestion. A non-string value is replaced
+by the active session ID.
+
+For example, inside `session("outer")`, an inner `session("inner")` sets `inner` on new
+spans. After the inner block ends, new spans use `outer`. A library
+span started with `convergent.session.id="library"` keeps `library`.
+
+### Session attributes from other instrumentation
+
+The receiver reads `convergent.session.id`, then `gen_ai.conversation.id`,
+then `session.id`. Direct IDs must be nonblank strings of at most 128
+characters. Unlike `session()`, the receiver preserves their whitespace.
+
+The SDK keeps `gen_ai.conversation.id` and `session.id` under the keys you
+supply through `attributes=` or `set_attribute()`. It does not rename them
+on export. A scoped session adds `convergent.session.id`, which takes priority
+when the receiver reads the span.
+
+For example, a span with `session.id="framework-7"` inside
+`session("conversation-42")` keeps both attributes. Convergent uses
+`conversation-42` for that span. Without the session block, it uses `framework-7`.
+A present blank `convergent.session.id` blocks either alias.
+
+`context_attributes` and `set_context_attributes()` reject all three session
+keys. They log the rejected key. Use `session()` to propagate an ID and use a
+direct attribute only when it should belong to one span. If you used one of
+these context keys for filtering, follow the
+[0.0.8 upgrade guide](stability.md#upgrading-from-008).
+
+Within a connected run, the session on the shallowest span wins for grouping.
+Ties use the earliest start time, then the span ID. Nested agent runs share
+that session. If no span supplies an ID, Convergent generates one for the
+root run; it cannot connect separate turns without your application's ID.
+
+### Async tasks and worker threads
+
+Async tasks copy the current context when they are created. Await their work
+before leaving the session block, or open a session inside each task.
+
+```python
+import asyncio
+
+async def record_turn():
+    with convergent.span(name="answer", operation="agent_run"):
+        await asyncio.sleep(0)
+
+async def run():
+    with convergent.session("conversation-42"):
+        task = asyncio.create_task(record_turn())
+        await task
+```
+
+The agent span records session ID `conversation-42`. If `await task` moves
+below the session block and no parent span was active when the task was
+created, the span has no session ID. A task can still inherit a session ID
+from a copied local parent span.
+
+A raw worker thread needs an explicit context copy or its own `session()`
+block. Session IDs do not enter outbound requests or OpenTelemetry baggage.
+Open the session explicitly in each service that records part of the
+conversation.
 
 ## Flush before a short-lived process exits
 
@@ -237,14 +390,13 @@ OpenTelemetry `ReadableSpan`, so you assert on `name`, `attributes`, `parent`, a
 `status`.
 
 ```python
-answer("my invoice")
+answer("Order 42 is late", "enterprise")
 
 recorded = {span.name: span for span in spans.get_finished_spans()}
-run = recorded["invoke_agent convergent-demo"]
-assert run.attributes["gen_ai.agent.name"] == "convergent-demo"
+run = recorded["invoke_agent support-agent"]
+assert run.attributes["gen_ai.agent.name"] == "support-agent"
+assert run.attributes["tier"] == "enterprise"
 assert run.attributes["gen_ai.agent.version"] == "9f2c1d4"
-assert recorded["gpt-5.5"].attributes["gen_ai.operation.name"] == "chat"
-assert recorded["gpt-5.5"].parent.span_id == run.context.span_id
 ```
 
 Assert only on what the traced code sets. A run that records the question and the

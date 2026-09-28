@@ -9,9 +9,10 @@ cannot work: logged at ERROR and disabled by default, raised at startup when
 `strict=True` or `CONVERGENT_STRICT=1` is set. `File` and `Console` check their
 own literal arguments and raise at construction. After setup, nothing raises.
 
-There are no Convergent exception types. A value of the wrong type raises
-`TypeError`, a value of the right type that is not allowed raises `ValueError`, and
-a spans file that cannot be opened raises `OSError`.
+There are no Convergent exception types. Except where a callable below says it
+ignores an invalid value, a value of the wrong type raises `TypeError`, a value
+of the right type that is not allowed raises `ValueError`, and a spans file that
+cannot be opened raises `OSError`.
 
 Each callable is documented in one order: the signature, the return value,
 then the arguments with the type and whether the argument is required. Each
@@ -172,10 +173,10 @@ Returned by `init()`.
 | `enabled` | `bool` | `True`, `False` | tracing is on |
 | `deployment` | `str \| None` | — | the registered deployment id |
 | `release` | `str \| None` | — | the release this process reported |
-| `agents` | `list[str]` | — | the names the server confirmed it linked |
+| `agents` | `list[str]` | — | the names `init()` declared, as the server echoed them back |
 | `destinations` | `list[str]` | — | e.g. `["convergent", "file:/data/traces/spans.jsonl"]` |
 | `mode` | `str` | `"owned"`, `"attached"` | whether `init()` created the tracer provider or attached to yours |
-| `app_url` | `str \| None` | — | where this deployment is in the workspace. `None` today, because nothing fills it in yet |
+| `app_url` | `str \| None` | — | reserved; always `None` |
 | `reason` | `str \| None` | `None`, `"missing_config"`, `"invalid_config"`, `"setup_failed"`, `"no_provider"`, `"already_configured"` | `None`, or why part of the setup is not working |
 | `require_span_attributes` | `Mapping \| None` | — | the running require filter, as attribute name to value list. `None` when not configured |
 | `reject_span_attributes` | `Mapping \| None` | — | the running reject filter, same shape. `None` when not configured |
@@ -184,10 +185,9 @@ The two filter fields echo what validation kept after a keyword argument beat
 its environment variable, so they state what this process filters on. The
 printed `check()` report shows them as one `filters` row, reject first.
 
-`agents` reports registration with the server. The filter described in
+`agents` is the list this process declared. The filter described in
 [Filtering what is sent](../opentelemetry.md#filtering-what-is-sent) enforces
-the list this process declared, so a name the server declined still has its
-spans sent.
+it locally; the server records an agent when its first spans arrive.
 
 ### check()
 
@@ -196,8 +196,8 @@ convergent.check() -> Report
 ```
 
 Reads what `init()` configured, then asks the server what it can see for the
-same key and release. A network failure, a rejected key, and an unparseable
-response all come back as a report saying so. Print it.
+same key. A network failure, a rejected key, and an unparseable response all
+come back as a report saying so. Print it.
 
 **Returns:** a [Report](#report). Takes no arguments.
 
@@ -206,12 +206,11 @@ broken, and the server answered for this key. A correct file only setup is
 false, because there is no key to answer with. To gate CI on a file only setup,
 check `Status.enabled` and then check that the spans file has content.
 
-Do not poll `check()` from a health check on a short interval. Frequent calls can
-slow deployment registration.
+Do not poll `check()` from a health check on a short interval.
 
-The server links an agent to a release when its first spans finish ingesting,
-so a check immediately after a flush can list no agent. Wait and check again
-before you read that as a failure.
+The server records an agent when its first spans finish ingesting, so a check
+immediately after a flush can list no agent. Wait and check again before you
+read that as a failure.
 
 #### Report
 
@@ -222,7 +221,7 @@ before you read that as a failure.
 | `round_trip_ms` | `int \| None` | — | how long the round trip took. Set only when the server answered |
 | `endpoint` | `str \| None` | — | where the round trip went. Never carries the key |
 | `organization_id` | `str \| None` | — | the workspace the key belongs to |
-| `agents` | `list[str]` | — | agents the server has linked to this release |
+| `agents` | `list[str]` | — | agents the server has recorded for the key's workspace |
 | `agents_truncated` | `bool` | `True`, `False` | `True` when the server had more than it would list |
 | `notes` | `list[Note]` | — | a `Note` for each problem the server can see |
 
@@ -234,16 +233,57 @@ before you read that as a failure.
 | `message` | `str` | — | the server's own wording for it, ready to print |
 
 `code` is a plain string rather than a fixed set, so a problem named after this
-SDK shipped still reaches the reader through `message`. Today the server sends a
-note when no deployment is registered for the release, and when a deployment is
-registered but no agent has ever been linked to it.
+SDK shipped still reaches the reader through `message`. Today the server sends
+no notes.
 
 ## Tracing
+
+### session()
+
+```python
+convergent.session(session_id) -> Iterator[None]
+```
+
+Sets `convergent.session.id` on every span started inside the block through
+the configured provider, including spans from instrumented libraries. It
+opens no span and does not join separate traces into one trace.
+
+```python
+with convergent.session("conversation-42"):
+    answer(question)
+```
+
+**Returns:** a context manager. It yields no value.
+
+**Arguments:**
+
+- **`session_id`** (`str`, required): your application's conversation or
+  thread ID. The SDK removes surrounding whitespace, then accepts 1 to 128
+  characters. For example, `" conversation-42 "` becomes `"conversation-42"`.
+
+A span that starts with a string-valued `convergent.session.id` keeps it,
+even when the string is blank. An existing non-string value is replaced by
+the active session ID. Nested sessions use the inner ID and restore the
+outer ID when they end. An invalid argument logs once and adds no new ID;
+an outer session remains active.
+
+Await async work before leaving the block, or open a session inside the
+task. See [async tasks and worker threads](../instrument.md#async-tasks-and-worker-threads).
+A raw thread needs a context copy or its own session block. The ID does not
+enter OpenTelemetry baggage or outbound requests. Open a session explicitly
+in each service.
+
+`attributes=` and `set_attribute()` preserve the direct keys
+`gen_ai.conversation.id` and `session.id`. `session()` adds its own key,
+which takes priority at ingestion. `context_attributes` and
+`set_context_attributes()` reject all three session keys; use `session()`
+for propagation. See [conversation grouping](../instrument.md#link-the-turns-of-a-conversation)
+for precedence and nested-session examples.
 
 ### observe()
 
 ```python
-convergent.observe(*, name, operation, attributes=None, context_attributes=None) -> Callable
+convergent.observe(*, name, operation, attributes=None, context_attributes=None, model=None, system_instructions=None, tools=None) -> Callable
 ```
 
 Records each call of the decorated function as one span. Works on plain
@@ -287,6 +327,19 @@ input and output.
   when `require_span_attributes=` or `reject_span_attributes=` is configured,
   because an untagged span must not slip past a filter.
   [span()](#span) states the full rules for both parameters.
+- **`model`** (`str`, optional), **`system_instructions`** (`str`, optional),
+  and **`tools`** (`Sequence[Mapping[str, Any]]`, optional): how the agent is
+  configured. `model` is the model it calls, `system_instructions` is the
+  prompt it runs with, and `tools` is the tool definitions it offers. They
+  apply when the operation resolves to `invoke_agent`, which `agent_run` and
+  `operation="invoke_agent"` both do, and land on that one span, `tools` as
+  one JSON string. The SDK ignores these arguments on other operations and
+  logs the reason. They describe the agent; they do not configure its model
+  client or execute its tools. `tools` accepts a sequence of JSON-safe mappings, including
+  OpenAI-style `{"type": "function", "function": {...}}` definitions and
+  Anthropic-style `{"name": ..., "input_schema": ...}` definitions.
+  See [agent configuration attributes](../instrument.md#agent-configuration-attributes)
+  for the recorded keys and their precedence.
 
 A generator's span covers the whole iteration, and abandoning one early is not
 recorded as an error. A traced generator nobody exhausted still has its span open
@@ -298,7 +351,7 @@ and the span is still recorded. Validation happens at ingest.
 ### agent()
 
 ```python
-convergent.agent(*, name, attributes=None, context_attributes=None) -> Callable
+convergent.agent(*, name, attributes=None, context_attributes=None, model=None, system_instructions=None, tools=None) -> Callable
 ```
 
 `observe(name=name, operation="agent_run")`, spelled for the common case.
@@ -318,7 +371,26 @@ def handle(ticket): ...
   in the code rename the agent.
 - **`attributes`** (`Mapping[str, str | bool | int | float]`, optional) and
   **`context_attributes`** ([`ContextAttributes`](#contextattributes),
-  optional): as on [observe()](#observe).
+  optional): as on [observe()](#observe). A custom key becomes an attribute
+  on the run. The SDK rejects keys prefixed `convergent.`. There is
+  no separate `custom=` keyword.
+- **`model`**, **`system_instructions`**, and **`tools`**: as on
+  [observe()](#observe).
+
+  ```python
+  @convergent.agent(
+      name="support-agent",
+      model="gpt-4o",
+      system_instructions="Look up the order before answering.",
+      tools=[{"name": "lookup_order", "description": "Fetch one order by ID."}],
+      attributes={"acme.prompt_revision": "r2"},
+  )
+  def handle(ticket: str) -> str:
+      ...
+  ```
+
+  This records the configuration on the run itself. A child model call does
+  not supply missing agent configuration.
 
 ### tool()
 
@@ -349,7 +421,7 @@ The bare `@convergent.tool` form is not supported.
 ### span()
 
 ```python
-convergent.span(*, name, operation, attributes=None, context_attributes=None) -> Iterator
+convergent.span(*, name, operation, attributes=None, context_attributes=None, model=None, system_instructions=None, tools=None) -> Iterator
 ```
 
 Records one span for the body of a `with` block.
@@ -374,6 +446,8 @@ with convergent.span(name="answer", operation="model_call") as handle:
   They land on that span and on every span started inside the block, library
   spans included. The Mapping form only: a `with` block has no call arguments
   to resolve the callable form the decorators take.
+- **`model`**, **`system_instructions`**, and **`tools`**: as on
+  [observe()](#observe).
 
 The `context_attributes` pairs live in the OpenTelemetry context for exactly
 the block's lifetime. The SDK stamps
@@ -391,7 +465,9 @@ so pass `contextvars.copy_context()` to reach a worker thread.
 
 Both parameters take plain `str`, `bool`, `int`, or `float` values. A key the
 SDK owns, or a `context_attributes` value of any other type, is dropped and
-logged once.
+logged once. The session keys `convergent.session.id`,
+`gen_ai.conversation.id`, and `session.id` are also rejected in
+`context_attributes`. Use [session()](#session) for those IDs.
 
 An exception leaving the block sets the span status to error and re-raises.
 `GeneratorExit` and `asyncio.CancelledError` pass through untouched.
@@ -416,21 +492,17 @@ process. When you want the message in the trace, put it on a key of your own wit
 | `text_completion` | `text_completion` |
 | `generate_content` | `generate_content` |
 
-The workspace renders `agent_run`, `model_call`, and `tool_call` as their own
-kind of step, and renders `text_completion` and `generate_content` the way it
-renders `model_call`.
-
-Any other string is recorded exactly as you wrote it, so a custom operation such
-as a guardrail check or an approval step is supported. It joins its run the same
-way, and the workspace shows most such steps generically, carrying the span name,
-the duration, and the attributes; a step may instead be filed under a broader
-label the workspace infers from the words in its name. `retrieval`,
-`embeddings`, `workflow`, and `agent_create` are recorded and shown the same
-way. One operation name is never read as another, so `tool` and `toolcall` stay
-the words you wrote and are not filed under `tool_call`.
+The emitted operations `invoke_agent`, `chat`, and `execute_tool` identify
+agent, model, and tool spans. `text_completion` and `generate_content` also
+identify model spans. Other operations keep their text and record generic
+spans. For example, `operation="toolcall"` stays `toolcall`; it does not
+become a tool call. See [span kinds](attributes.md#fields-kept-for-each-span-kind)
+for the fields each kind keeps.
 
 An `agent_run` also writes `gen_ai.agent.name`, and `gen_ai.agent.version` when
-the process reported a release. A `tool_call` writes `gen_ai.tool.name`, and
+the process reported a release. When passed, it writes `convergent.agent.model`,
+`convergent.agent.system_instructions`, and `convergent.agent.tools`, the last
+as one JSON string. A `tool_call` writes `gen_ai.tool.name`, and
 `gen_ai.tool.type` as `function` unless you pass your own.
 
 Those two are also the only span names the SDK rewrites: an `agent_run` span is
@@ -455,14 +527,18 @@ for the other two.
 | `set_tool_call_id(call_id)` | writes `gen_ai.tool.call.id`, which pairs the model's request for a call with the call itself |
 | `trace_id` | the trace the span sits in, as a hex string |
 | `span_id` | the span's own id, as a hex string |
-| `permalink` | `None` today, because no route displays a single trace |
+| `permalink` | reserved; always `None` |
 
-A value passed to `set_input()` or `set_output()` that is already a list of
-message dictionaries goes through untouched. Anything else becomes the text
-content of one message.
+On tool calls, `set_input()` and `set_output()` record a string unchanged
+and serialize other values as JSON. On other operations, a nonempty list of
+mappings with a `role` key in every item becomes a JSON message list. Other
+values become the text of one message, with role `user` for input and
+`assistant` for output. For example, `set_input([])` records one user message
+whose text is `[]`. These methods do not read function arguments or return
+values automatically.
 
-`set_attribute()` drops any key starting with `convergent.` and these eight, and
-logs one line naming the key.
+`set_attribute()` drops keys starting with `convergent.` and the eight keys
+listed below. It logs the rejected key.
 
 `set_context_attributes()` takes the pairs you only know mid-request, such as a
 customer id looked up from a token. It stamps the running span at once, and
@@ -525,7 +601,7 @@ convergent.current_trace() -> TraceRef | None
 | --- | --- | --- | --- |
 | `trace_id` | `str` | — | the trace, as a hex string |
 | `span_id` | `str` | — | the active span, as a hex string |
-| `permalink` | `str \| None` | — | `None` today, because no route displays a single trace |
+| `permalink` | `str \| None` | — | reserved; always `None` |
 
 ### flush()
 

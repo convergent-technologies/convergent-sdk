@@ -358,35 +358,6 @@ def test_status_falls_back_to_the_declared_names(
     assert status.agents == ["support-agent"]
 
 
-def test_the_filter_leaves_the_callers_own_exporters_alone(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Attach mode. Their pipeline was there first and keeps receiving everything."""
-    theirs = InMemorySpanExporter()
-    ours = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(theirs))
-    trace.set_tracer_provider(provider)
-
-    monkeypatch.setattr(
-        _registry, "post_json", lambda *a, **k: {"deployment_id": "dep_1", "is_new": True}
-    )
-    monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(ours))
-    convergent.init(
-        api_key="test-key",  # pragma: allowlist secret
-        endpoint="https://example.test",
-        release="r1",
-        agents=["support-agent"],
-    )
-
-    with convergent.span(name="billing-agent", operation="agent_run"):
-        pass
-
-    assert _names(theirs) == {"invoke_agent billing-agent"}
-    assert _names(ours) == set()
-    provider.shutdown()
-
-
 def test_a_span_with_no_context_is_dropped() -> None:
     """Fail closed at the last step too. A span the filter cannot key is not sent."""
     exporter = InMemorySpanExporter()

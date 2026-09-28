@@ -1326,10 +1326,21 @@ def test_a_malformed_filter_variable_raises_under_strict(
 # --- the init() wiring -------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("filter_kwargs", "context_attributes"),
+    [
+        ({"require_span_attributes": {"customer.id": ["acme"]}}, {"customer.id": "initech"}),
+        ({"agents": ["support-agent"]}, None),
+    ],
+    ids=["require_span_attributes", "agents"],
+)
 def test_the_filter_leaves_the_callers_own_exporters_alone(
     monkeypatch: pytest.MonkeyPatch,
+    filter_kwargs: dict[str, Any],
+    context_attributes: dict[str, str] | None,
 ) -> None:
-    """Attach mode. Their pipeline was there first and keeps receiving everything."""
+    """Attach mode. Their pipeline was there first and keeps receiving everything.
+    Both filters sit in front of Convergent's destinations only."""
     theirs = InMemorySpanExporter()
     ours = InMemorySpanExporter()
     provider = TracerProvider()
@@ -1344,11 +1355,11 @@ def test_the_filter_leaves_the_callers_own_exporters_alone(
         api_key="test-key",  # pragma: allowlist secret
         endpoint="https://example.test",
         release="r1",
-        require_span_attributes={"customer.id": ["acme"]},
+        **filter_kwargs,
     )
 
     with convergent.span(
-        name="billing-agent", operation="agent_run", context_attributes={"customer.id": "initech"}
+        name="billing-agent", operation="agent_run", context_attributes=context_attributes
     ):
         pass
 

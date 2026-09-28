@@ -17,12 +17,16 @@ pairs live in a private OpenTelemetry context value for the span's lifetime.
 :class:`ContextAttributesSpanProcessor` stamps each span at start under
 ``convergent.attributes.<key>``, library spans included.
 
-Every span also inherits its parent span's stamps. A span that starts on
-another thread, or under a context saved before the caller's block closed,
-carries the run's attributes through its parent. The span's own live scope
-adds pairs, and it wins for a key both hold. Stamps come from the parent
-span, never from a withdrawn scope's pairs. A span cannot carry values that
-disagree with its parentage.
+``session()`` uses the same context stack for one reserved exception:
+``convergent.session.id`` is stamped as a bare attribute. A span's existing
+string value wins; an invalid value is replaced by the valid scoped id.
+
+Every span also inherits its parent span's ``context_attributes=`` stamps. A
+span that starts on another thread, or under a context saved before the
+caller's block closed, carries the run's attributes through its parent. The
+span's own live scope adds pairs, and it wins for a key both hold. These stamps
+come from the parent span, never from a withdrawn scope's pairs, so they cannot
+carry values that disagree with parentage.
 
 The context value stays in the process. ``inject()`` writes nothing for it,
 unlike baggage, which a propagator writes into every outbound request. The
@@ -52,9 +56,12 @@ from ._egress import DeclaredAgentFilter
 #: cannot collide with this one.
 _CONTEXT_ATTRIBUTES = context.create_key("convergent-context-attributes")
 
-#: Every context pair is stamped under this prefix. ``set_attribute`` rejects
-#: caller keys starting with ``convergent.``, so only the stamper writes here.
+#: Every ordinary context pair is stamped under this prefix. ``set_attribute``
+#: rejects caller keys starting with ``convergent.``, so only the stamper writes
+#: here. ``SESSION_KEY`` is the one bare-key exception.
 _MARK_PREFIX = "convergent.attributes."
+
+SESSION_KEY = "convergent.session.id"
 
 #: The stamper stores each span's resolved pairs on the span object under this
 #: name. Inheritance reads that field, never the span's public attributes. The
@@ -84,12 +91,12 @@ _MARK_TOKENS_FIELD = "_convergent_mark_tokens"
 _FILTERS: weakref.WeakSet[FilterSpanProcessor] = weakref.WeakSet()
 
 #: Whether any scope was ever attached in this process. A process that sets no
-#: context attributes pays nothing at span start.
+#: context attributes or session id pays nothing at span start.
 _ever_attached = False
 
 
 class _Mark:
-    """One attached ``context_attributes=`` scope, and whether it is still open.
+    """One attached context scope, and whether it is still open.
 
     The liveness flag is the snapshot guard for a generator. A generator
     suspends inside its ``with`` block, so two interleaved generators detach
@@ -112,7 +119,7 @@ def attach_context(pairs: Mapping[str, Any]) -> object:
     """Attach ``pairs`` for every span started until the token is detached.
 
     Nested scopes merge, and the inner pair wins for a key both set. ``span()``
-    validates the pairs before calling this.
+    and ``session()`` validate the pairs before calling this.
     """
     global _ever_attached
     _ever_attached = True
@@ -233,8 +240,8 @@ def wrap(
 class ContextAttributesSpanProcessor(SpanProcessor):
     """Copies every context pair onto each span at start.
 
-    ``span()`` is the key's only writer and validates every pair before it
-    attaches, so the exact-type check below is a cheap last guard in front of
+    ``span()`` and ``session()`` validate every pair before attaching it, so
+    the exact-type check below is a cheap last guard in front of
     ``set_attribute`` rather than a validation layer.
     """
 
@@ -253,6 +260,13 @@ class ContextAttributesSpanProcessor(SpanProcessor):
                     # past the attribute limit, and this mark losing that race
                     # would send the span it exists to withhold.
                     stamped[key] = True
+                elif key == SESSION_KEY:
+                    existing = span.attributes.get(SESSION_KEY) if span.attributes else None
+                    if isinstance(existing, str):
+                        stamped[key] = existing
+                    elif isinstance(value, str):
+                        span.set_attribute(SESSION_KEY, value)
+                        stamped[key] = value
                 elif _policy._is_attribute_value(value):
                     span.set_attribute(_MARK_PREFIX + key, value)
                     stamped[key] = value

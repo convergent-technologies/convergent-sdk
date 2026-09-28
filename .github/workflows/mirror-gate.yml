@@ -34,8 +34,9 @@ jobs:
 
           explain() {
             echo "This repository is a mirror of an internal source tree."
-            echo "Every file here is written by a sync job, so a change merged"
-            echo "here directly is overwritten by the next sync."
+            echo "Every file here is written by a sync job. A change merged"
+            echo "here directly stops the sync, which refuses to run until the"
+            echo "change is ported to the internal source."
             echo ""
             echo "Reason this pull request is not from the sync: $1"
             echo ""

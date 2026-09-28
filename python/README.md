@@ -9,12 +9,12 @@ Convergent workspace.
 pip install convergent-sdk
 ```
 
-In a project that pins its dependencies, use `convergent-sdk>=0.0.4,<0.1`.
+For the APIs in these docs, use `convergent-sdk>=0.0.9,<0.1`.
 While the SDK is on 0.x, a minor release may change the public API, and the
 upper bound keeps such a release out of a routine dependency update.
 [Stability](docs/stability.md) states the full policy.
 
-## Set your key
+## Set your key and release
 
 Mint an ingestion key at
 [app.convergent.dev/workspace/settings](https://app.convergent.dev/workspace/settings).
@@ -22,13 +22,18 @@ Mint an ingestion key at
 ```bash
 export CONVERGENT_API_KEY="cvk_xxxxxxxxxxxxxxxx"
 
-# Optional
 export GIT_SHA=$(git rev-parse --short HEAD)
 ```
 
-`CONVERGENT_API_KEY` is required. The export works for local development. In a deployment, you'll want the key wherever you store secrets or your environment variables.
+`CONVERGENT_API_KEY` is required for network export. A local `File(...)`
+destination needs no API key. Store ingestion keys in your deployment's secret settings.
 
-`GIT_SHA` is an example environment variable name you can use to describe a release when initializing convergent with: `init(release=...)`. Note that describing a release is optional.
+`GIT_SHA` is an example variable read by `init(release=...)` below. A release is
+required; use a Git SHA, build ID, or immutable image tag. You can also set it
+with `CONVERGENT_RELEASE`.
+
+The `session()` helper requires SDK 0.0.9 or newer. Read the
+[0.0.8 upgrade guide](docs/stability.md#upgrading-from-008) before upgrading.
 
 ## Instrument with a coding agent
 

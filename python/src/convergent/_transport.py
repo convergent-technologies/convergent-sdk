@@ -3,8 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from opentelemetry.context import Context
 from opentelemetry.metrics import Counter, Meter, MeterProvider, NoOpCounter, NoOpMeter
@@ -17,7 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from opentelemetry.exporter.otlp.proto.http import Compression
-    from requests import Session
+    from requests import Response
 
 logger = logging.getLogger("convergent.sdk")
 
@@ -26,52 +25,36 @@ _QUEUE_FULL = "queue_full"
 _CONTENT_TOO_LARGE = 413
 
 
-class AuthRejectingSession:
-    def __init__(self, session: Any) -> None:
-        self._session = session
+class _ResponseHook:
+    """Reads the collector's answer to each export request the session makes."""
+
+    def __init__(self) -> None:
         self._rejected = False
         self._reported_too_large = False
-        self.headers = session.headers
 
     def is_rejected(self) -> bool:
         return self._rejected
 
-    def post(self, *args: Any, **kwargs: Any) -> Any:
-        if self._rejected:
-            return _accepted()
-        response = self._session.post(*args, **kwargs)
-        if response.status_code == _CONTENT_TOO_LARGE:
+    def __call__(self, response: Response, **_: Any) -> None:
+        status = response.status_code
+        if status in (401, 403) and not self._rejected:
+            self._rejected = True
+            logger.warning(
+                "Convergent tracing is disabled because the collector rejected its credentials"
+            )
+        elif status == _CONTENT_TOO_LARGE and not self._reported_too_large:
             # The exporter does not retry a 413, so the batch is simply gone. Named
             # once per process: a producer whose spans are reliably too large would
             # otherwise log on every export forever.
-            if not self._reported_too_large:
-                self._reported_too_large = True
-                logger.error(
-                    "Convergent lost a span batch: the collector refused it as too "
-                    "large, and a 413 is not retried. Lower "
-                    "OTEL_BSP_MAX_EXPORT_BATCH_SIZE so each request carries fewer "
-                    "spans. A single span whose own content exceeds the receiver's "
-                    "limit cannot be exported at any batch size.",
-                    extra={"event": "convergent.sdk.batch_too_large"},
-                )
-            return response
-        if response.status_code not in (401, 403):
-            return response
-        self._rejected = True
-        close = getattr(response, "close", None)
-        if callable(close):
-            close()
-        logger.warning(
-            "Convergent tracing is disabled because the collector rejected its credentials"
-        )
-        return _accepted()
-
-    def close(self) -> None:
-        self._session.close()
-
-
-def _accepted() -> SimpleNamespace:
-    return SimpleNamespace(ok=True, status_code=200, reason="disabled")
+            self._reported_too_large = True
+            logger.error(
+                "Convergent lost a span batch: the collector refused it as too "
+                "large, and a 413 is not retried. Lower "
+                "OTEL_BSP_MAX_EXPORT_BATCH_SIZE so each request carries fewer "
+                "spans. A single span whose own content exceeds the receiver's "
+                "limit cannot be exported at any batch size.",
+                extra={"event": "convergent.sdk.batch_too_large"},
+            )
 
 
 class _DropCounter(NoOpCounter):
@@ -134,10 +117,8 @@ def lost_spans() -> int:
 class _LossCountingExporter(SpanExporter):
     """Counts the spans the wrapped exporter failed to deliver.
 
-    ``rejected`` is how a refused credential becomes a counted loss: once the
-    collector answers 401 or 403, :class:`AuthRejectingSession` reports success
-    to the exporter so it neither retries nor logs per batch, and this wrapper
-    is the only layer that still knows the batch never landed.
+    ``rejected`` says whether the collector has refused the credentials. Once it
+    has, a batch is counted as lost without being encoded or sent.
     """
 
     def __init__(self, exporter: SpanExporter, rejected: Callable[[], bool] | None) -> None:
@@ -149,9 +130,6 @@ class _LossCountingExporter(SpanExporter):
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         if self._credentials_rejected():
-            # The post-export check below counts a withheld batch too; this
-            # branch only skips the pointless encode and post once the key is
-            # known dead.
             _record_lost(len(spans))
             return SpanExportResult.FAILURE
         try:
@@ -161,12 +139,6 @@ class _LossCountingExporter(SpanExporter):
             raise
         if result is not SpanExportResult.SUCCESS:
             _record_lost(len(spans))
-            return result
-        if self._credentials_rejected():
-            # The rejection happened on this batch: the session answered the
-            # exporter with a success so nothing retries, but nothing landed.
-            _record_lost(len(spans))
-            return SpanExportResult.FAILURE
         return result
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
@@ -250,13 +222,14 @@ def build_processor(*, api_key: str, endpoint: str) -> SpanProcessor:
     warn_on_conflicting_auth_header()
     session = Session()
     session.headers.update({"Authorization": f"Bearer {api_key}"})
-    guard = AuthRejectingSession(session)
+    hook = _ResponseHook()
+    session.hooks["response"].append(hook)
     exporter = OTLPSpanExporter(
         endpoint=f"{endpoint.rstrip('/')}/v1/traces",
-        session=cast("Session", guard),
+        session=session,
         compression=_compression(),
     )
-    return batch_processor(exporter, rejected=guard.is_rejected)
+    return batch_processor(exporter, rejected=hook.is_rejected)
 
 
 def _compression() -> Compression:
@@ -381,7 +354,6 @@ def pending_spans(processor: SpanProcessor) -> int:
 
 
 __all__ = [
-    "AuthRejectingSession",
     "batch_processor",
     "build_processor",
     "dropped_spans",

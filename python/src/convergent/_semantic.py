@@ -6,10 +6,6 @@ tool call they write ``gen_ai.tool.call.arguments`` and
 hold one value each. On every other span they write ``gen_ai.input.messages`` and
 ``gen_ai.output.messages``, which hold a message *array*, so a value that is not
 already one is wrapped as the text content of a single message.
-
-The message keys replaced this SDK's ``convergent.input`` /
-``convergent.output``. Ingest still reads the older keys, so a span that carries
-either spelling is understood.
 """
 
 from __future__ import annotations
@@ -56,13 +52,9 @@ Operation = Literal[
     "generate_content",
 ]
 
-#: What ``observe()`` and ``span()`` accept. Deliberately wider than
-#: :data:`Operation`: a custom operation is a documented feature -- a guardrail
-#: check or an approval step is real work, recorded verbatim -- so narrowing this
-#: to the ``Literal`` would make a supported call a type error. The cost is that a
-#: typo like ``"tool_cal"`` type-checks; it is reported at runtime instead, and
-#: annotating a parameter :data:`Operation` is how a caller opts into the stricter
-#: check.
+#: What ``observe()`` and ``span()`` accept. A custom operation is recorded
+#: verbatim, so an unknown string is reported at runtime rather than by the type
+#: checker. Annotate a parameter :data:`Operation` for the stricter check.
 AnyOperation = Operation | str
 
 #: Returned by a context resolver when the pairs could not be worked out.
@@ -94,18 +86,10 @@ _OPERATIONS: dict[str, str] = {
 _SEMANTIC_VERSION = "1"
 _EXECUTION_KEY = "convergent.execution.id"
 
-#: Marks a span whose message content ``set_input``/``set_output`` wrote.
-#:
-#: Deliberately *not* ``convergent.semantic.version``, which is the obvious
-#: candidate and the wrong one: ``SemanticSpanProcessor`` stamps that on every span
-#: declaring a ``gen_ai.operation.name``, and it sits on the process provider every
-#: framework emits through -- so a pydantic-ai or OpenLLMetry span carries it
-#: whenever that instrumentation supplies its attributes at span creation, which is
-#: the normal case. This key is written at exactly one place, so it means what it says.
-#:
-#: Read by our ingest to decide whether to mirror the
-#: standard message keys onto the ``convergent.*`` ones. A caller cannot forge it:
-#: ``set_attribute`` rejects every ``convergent.``-prefixed key.
+#: Marks a span whose message content ``set_input``/``set_output`` wrote. Ingest
+#: reads it to decide whether to mirror the standard message keys onto the
+#: ``convergent.*`` ones. ``set_attribute`` rejects every ``convergent.``-prefixed
+#: key, so a caller cannot write it.
 _CONTENT_SOURCE_KEY = "convergent.content.source"
 _CONTENT_SOURCE = "sdk"
 
@@ -124,14 +108,10 @@ _DEFAULT_TOOL_TYPE = "function"
 
 #: The OpenTelemetry schema the attribute names above are taken from, carried on
 #: the tracer so a consumer reads our spans against the version we wrote them for.
-#:
-#: 1.40.0 is the version the collector's ``gen_ai_normalizer`` processor stamps on
-#: a span it writes, so a span of ours and a span that processor normalized
-#: describe themselves the same way. That processor leaves a scope that already
-#: names a schema alone, so writing it here also stops it restamping ours.
 _GENAI_SCHEMA_URL = "https://opentelemetry.io/schemas/1.40.0"
 
 _NAME_LIMIT = 128
+_SESSION_ID_LIMIT = 128
 #: Longest tool call id that ships. A provider id runs about thirty characters
 #: (``call_`` or ``toolu_`` and a short token), so this is generous for a real one
 #: and short enough that the field cannot carry a payload.
@@ -153,15 +133,17 @@ _RESERVED_ATTRIBUTE_KEYS = frozenset(
         "gen_ai.tool.call.result",
     }
 )
-_CONVERSATION_ID_INPUT_KEYS = ("gen_ai.conversation.id", "session.id")
-_CONVERSATION_ID_WRITE_KEYS = ("gen_ai.conversation.id", "convergent.session.id")
+_AGENT_MODEL_KEY = "convergent.agent.model"
+_AGENT_SYSTEM_INSTRUCTIONS_KEY = "convergent.agent.system_instructions"
+_AGENT_TOOLS_KEY = "convergent.agent.tools"
+_SESSION_CONTEXT_KEYS = frozenset(("gen_ai.conversation.id", "session.id", _processors.SESSION_KEY))
 _CONTROL_FLOW_EXCEPTIONS = (GeneratorExit, asyncio.CancelledError)
 
 #: Reasons already reported in this process. Bounded by the number of distinct
 #: reasons, never by caller input. See :func:`_report_once`.
 _reported: set[str] = set()
 
-#: Spans this SDK has started and not yet ended, in the calling context. Read by
+#: Spans this SDK has started and not ended, in the calling context. Read by
 #: ``flush()`` through :func:`has_open_span`.
 #:
 #: A ContextVar rather than a process-wide counter, so a ``flush()`` on a different
@@ -209,10 +191,6 @@ class SpanHandle:
 
     def set_attribute(self, key: str, value: Any) -> None:
         if not _accepted(key, value, "set_attribute()"):
-            return
-        if key in _CONVERSATION_ID_INPUT_KEYS:
-            for alias in _CONVERSATION_ID_WRITE_KEYS:
-                self._span.set_attribute(alias, value)
             return
         self._span.set_attribute(key, value)
 
@@ -328,6 +306,9 @@ def observe(
     operation: AnyOperation,
     attributes: Mapping[str, str | bool | int | float] | None = None,
     context_attributes: ContextAttributes | None = None,
+    model: str | None = None,
+    system_instructions: str | None = None,
+    tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> Callable[[F], F]:
     """Record each call of the decorated function as one span.
 
@@ -346,6 +327,12 @@ def observe(
     attaches to this span and to every span started while the call runs. A
     callable that raises, or that returns something that is not a Mapping, is
     logged once and the span is recorded with no context pairs.
+
+    ``model``, ``system_instructions``, and ``tools`` describe the agent as
+    configured: the model it calls, the prompt it runs with, and the tool
+    definitions it offers. They apply when the operation resolves to
+    ``invoke_agent``, which ``agent_run`` and ``operation="invoke_agent"`` both
+    do, and land on that one span, ``tools`` as one JSON string.
 
     Never raises. A name outside 1-128 characters or an unrecognized operation is
     logged and the span is still recorded -- ingest is where a bad name is
@@ -370,6 +357,9 @@ def observe(
                 operation=operation,
                 attributes=attributes,
                 context_attributes=resolved,
+                model=model,
+                system_instructions=system_instructions,
+                tools=tools,
             )
 
         if inspect.isasyncgenfunction(function):
@@ -491,6 +481,9 @@ def agent(
     name: str,
     attributes: Mapping[str, str | bool | int | float] | None = None,
     context_attributes: ContextAttributes | None = None,
+    model: str | None = None,
+    system_instructions: str | None = None,
+    tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> Callable[[F], F]:
     """Record each call of the decorated function as one agent run.
 
@@ -498,12 +491,16 @@ def agent(
     and everything :func:`observe` says holds here. ``name`` is required and
     keyword-only on purpose: it is the agent's workspace identity, and deriving
     it from the function name would let a rename in the code rename the agent.
+    ``model``, ``system_instructions``, and ``tools`` apply as on :func:`observe`.
     """
     return observe(
         name=name,
         operation="agent_run",
         attributes=attributes,
         context_attributes=context_attributes,
+        model=model,
+        system_instructions=system_instructions,
+        tools=tools,
     )
 
 
@@ -542,12 +539,16 @@ def span(
     operation: AnyOperation,
     attributes: Mapping[str, str | bool | int | float] | None = None,
     context_attributes: ContextAttributes | None = None,
+    model: str | None = None,
+    system_instructions: str | None = None,
+    tools: Sequence[Mapping[str, Any]] | None = None,
 ) -> Iterator[SpanHandle | _NoOpSpanHandle]:
     """Record one span for the body of the ``with`` block.
 
     Same naming rule as :func:`observe`: for ``agent_run``, ``name`` is a stable
     agent identity, never a per-request or per-user string, with the varying part
-    in ``attributes``. Never raises, for the same reason :func:`observe` does not.
+    in ``attributes``. ``model``, ``system_instructions``, and ``tools`` apply as
+    on :func:`observe`. Never raises, for the same reason :func:`observe` does not.
 
     ``attributes`` land on this one span. ``context_attributes`` land on this
     span and every span started inside the block, library spans included: the
@@ -577,18 +578,29 @@ def span(
     }
     if isinstance(attributes, Mapping):
         span_attributes.update({k: v for k, v in attributes.items() if _accepted(k, v)})
-        for key in _CONVERSATION_ID_INPUT_KEYS:
-            if key in span_attributes:
-                value = span_attributes[key]
-                span_attributes.pop("session.id", None)
-                for alias in _CONVERSATION_ID_WRITE_KEYS:
-                    span_attributes[alias] = value
-                break
     span_name = name
+    agent_identity = {
+        "model=": model,
+        "system_instructions=": system_instructions,
+        "tools=": tools,
+    }
+    passed = [label for label, value in agent_identity.items() if value is not None]
+    if operation_name != "invoke_agent" and passed:
+        _report_once(
+            "agent_identity_outside_agent_run",
+            f"Convergent ignored {', '.join(passed)}: these parameters describe an "
+            "agent run, and this span records a different operation.",
+        )
     if operation_name == "invoke_agent":
         span_attributes["gen_ai.agent.name"] = name
         if state.release is not None:
             span_attributes["gen_ai.agent.version"] = state.release
+        if model is not None:
+            span_attributes[_AGENT_MODEL_KEY] = model
+        if system_instructions is not None:
+            span_attributes[_AGENT_SYSTEM_INSTRUCTIONS_KEY] = system_instructions
+        if tools is not None:
+            span_attributes[_AGENT_TOOLS_KEY] = _dump(tools)
         span_name = f"invoke_agent {name}"
     elif operation_name == _TOOL_OPERATION:
         span_attributes["gen_ai.tool.name"] = name
@@ -710,6 +722,39 @@ def current_trace() -> TraceRef | None:
     return _trace_ref(trace.get_current_span())
 
 
+def _session_value(session_id: object) -> str | None:
+    if isinstance(session_id, str):
+        value = session_id.strip()
+        if 0 < len(value) <= _SESSION_ID_LIMIT:
+            return value
+    _report_once(
+        "invalid_session_id",
+        f"Convergent ignored an invalid session id: it must be a nonblank string of "
+        f"1-{_SESSION_ID_LIMIT} characters.",
+    )
+    return None
+
+
+@contextmanager
+def session(session_id: str) -> Iterator[None]:
+    """Stamp every span started in this block with one session id.
+
+    Library spans are included unless they already carry their own id. Nested
+    blocks use the innermost id and restore the outer id when they end. The id
+    stays in this process and is not added to OpenTelemetry baggage. Invalid ids
+    are logged and the block runs unchanged.
+    """
+    value = _session_value(session_id)
+    if value is None:
+        yield
+        return
+    token = _processors.attach_context({_processors.SESSION_KEY: value})
+    try:
+        yield
+    finally:
+        _processors.detach_context(token)
+
+
 def current_span() -> SpanHandle | _NoOpSpanHandle:
     """A handle on the innermost active span, whatever created it.
 
@@ -790,6 +835,13 @@ def _accepted_context(key: Any, value: Any, parameter: str = "context_attributes
     subclass such as a ``StrEnum`` member would stamp a value no rule could
     ever match.
     """
+    if isinstance(key, str) and key in _SESSION_CONTEXT_KEYS:
+        _report_once(
+            "session_key_in_context_attributes",
+            f"Convergent ignored the {parameter} entry {key!r}: use "
+            "convergent.session() to scope a session id.",
+        )
+        return False
     if not _accepted_key(key, parameter):
         return False
     if not _policy._is_attribute_value(value):
@@ -869,16 +921,9 @@ def _recognized_operation(operation: str) -> bool:
 def _report_once(key: str, message: str, *, level: int = logging.ERROR) -> None:
     """Log once per *reason* per process, at ERROR unless told otherwise.
 
-    ``key`` must be a fixed reason, never anything derived from caller input.
-    Keying on the offending name or attribute would make this set grow without
-    bound for a caller passing ``f"agent-{uuid4()}"`` in a loop -- the exact
-    high-cardinality leak our own docs warn customers about, reproduced inside the
-    SDK, and reachable precisely because we now tolerate bad input instead of
-    rejecting it. Tolerating must not itself leak.
-
-    The cost is that only the first offending value appears in the logs. That is
-    the right trade: ``check()`` reports malformed and undeclared names from the
-    server, which sees all of them and is the better channel for the full list.
+    ``key`` must be a fixed reason, never anything derived from caller input, so
+    the set of seen keys stays bounded. Only the first offending value appears
+    in the logs; ``check()`` reports the full list from the server.
 
     Rate-limited because ``span()`` re-checks its arguments on every call, so an
     unusable name in a loop would emit a line per span and bury its own signal.

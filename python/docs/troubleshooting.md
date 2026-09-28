@@ -207,8 +207,8 @@ it still carries a valid id and the child keeps the trace.
 
 If you passed `agents=[...]`, an agent you did not name is dropped inside your
 process before anything is sent. The `agents` line `check()` prints is the
-server's list of linked agents, not your local declaration, so compare the list
-in the `init()` call against the `gen_ai.agent.name` each span carries.
+server's list of agents it has recorded, not your local declaration, so compare
+the list in the `init()` call against the `gen_ai.agent.name` each span carries.
 
 An agent run that never names itself is also dropped, because a span with no
 parent is kept only by name.

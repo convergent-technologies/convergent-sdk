@@ -9,7 +9,7 @@ Convergent workspace.
 pip install convergent-sdk
 ```
 
-## Set your key
+## Set your key and release
 
 Mint an ingestion key at
 [app.convergent.dev/workspace/settings](https://app.convergent.dev/workspace/settings).
@@ -17,13 +17,18 @@ Mint an ingestion key at
 ```bash
 export CONVERGENT_API_KEY="cvk_xxxxxxxxxxxxxxxx"
 
-# Optional
 export GIT_SHA=$(git rev-parse --short HEAD)
 ```
 
-`CONVERGENT_API_KEY` is required. The export works for local development. In a deployment, you'll want the key wherever you store secrets or your environment variables.
+`CONVERGENT_API_KEY` is required for network export. A local `File(...)`
+destination needs no API key. Store ingestion keys in your deployment's secret settings.
 
-`GIT_SHA` is an example environment variable name you can use to describe a release when initializing convergent with: `init(release=...)`. Note that describing a release is optional.
+`GIT_SHA` is an example variable read by `init(release=...)` below. A release is
+required; use a Git SHA, build ID, or immutable image tag. You can also set it
+with `CONVERGENT_RELEASE`.
+
+The `session()` helper requires SDK 0.0.9 or newer. Read the
+[0.0.8 upgrade guide](python/docs/stability.md#upgrading-from-008) before upgrading.
 
 ## Instrument with a coding agent
 

@@ -101,7 +101,7 @@ as `responses`, and an embedding as `embedding`. Convergent recognizes litellm's
 spans by their tracer name and reads litellm's names for its call types, so each
 call renders as the kind of step it is, with the model, the tokens, the
 messages, and the cost on it. See
-[operation names](../reference/attributes.md#litellm-values-for-gen_aioperationname)
+[operation names](../reference/attributes.md#litellm-operation-values)
 for the whole list.
 
 ## The newer callback

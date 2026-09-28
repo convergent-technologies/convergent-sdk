@@ -13,26 +13,28 @@ It works toward an expected recording.
 It reports evidence-backed findings.
 It changes no code.
 
-The skill tells the agent to work from current sources: it installs the latest
-`convergent-sdk` when the project does not pin one, and it reads the current
-docs from the [SDK repository](https://github.com/convergent-technologies/convergent-sdk/tree/main/python/docs)
-before it edits code.
+Each skill tells the agent to work from current sources.
+`convergent-instrument` checks the installed SDK and preserves project pins.
+Both skills include their workflow and local reference files. They can read
+public documentation or a matching public SDK checkout for API details.
+Local instrumentation and verification need no Convergent CLI or hosted login.
 
 ## Install the skills
 
-Use the Skills CLI to install both skills for your coding agent:
+Ask your coding agent to install the skills from the GitHub repository
+`convergent-technologies/convergent-sdk`. The prompt on the
+[Get started](index.md) page does this as its first step.
 
-```bash
-npx skills add convergent-technologies/convergent-sdk
-```
+The skills install into the repository:
 
-Select `convergent-instrument` and `convergent-verify` when prompted.
+- Claude Code reads `.claude/skills`.
+- Codex reads `.agents/skills`.
 
-You can also copy each directory from `skills/` into your agent's skills directory.
-Keep both directory names unchanged.
+## Start the agent
 
-The [SDK README](https://github.com/convergent-technologies/convergent-sdk#instrument-with-a-coding-agent)
-has prompts for new and existing setups.
+Give the coding agent the instrument prompt from the [Get started](index.md)
+page. It names the agent to instrument and one representative run, and it
+tells the agent to use both skills until the recording is clean.
 
 ## Instrument one agent
 
@@ -44,15 +46,15 @@ The skill performs these actions:
 
 1. It maps the reachable agent, model, tool, and subagent calls.
 2. It defines the recording expected from the selected command.
-3. It asks which recorded content to exclude.
+3. It explains which content will be recorded and resolves missing content decisions.
 4. It adds the smallest supported instrumentation.
 5. It runs the command into a temporary spans directory.
 6. It invokes `convergent-verify` on the recording.
 7. It fixes evidence-backed instrumentation issues.
 8. It repeats until the recording reaches the expected state.
 
-The skill uses no retry limit.
-It stops when no instrumentation change can advance the recording.
+The skill stops when the recording matches expectations or a problem outside
+instrumentation prevents progress. Each rerun follows an evidence-backed change.
 It asks for user action when credentials or permission are required.
 
 ## Verify a recording
@@ -65,4 +67,4 @@ The skill renders one agent subtree.
 It includes nested agents with different names.
 It hides recorded content values by default.
 It reports `issue`, `question`, and `fyi` findings.
-It writes no files.
+It leaves application code unchanged.

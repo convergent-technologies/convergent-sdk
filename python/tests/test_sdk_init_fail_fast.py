@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -118,56 +118,50 @@ def test_a_file_destination_with_no_api_key_is_a_complete_configuration(tmp_path
 
 
 # --------------------------------------------------------------------------
-# init() raises: a malformed endpoint
+# init() raises: one bad keyword argument
 # --------------------------------------------------------------------------
 
 
-def test_an_endpoint_that_is_not_a_url_raises_value_error() -> None:
-    """It was accepted and failed later, at registration and at export."""
-    with pytest.raises(ValueError):
-        convergent.init(strict=True, api_key=_KEY, endpoint="ingest.convergent", release="r1")
+@pytest.mark.parametrize(
+    ("given", "error"),
+    [
+        # A malformed endpoint was accepted and failed later, at registration and
+        # at export.
+        ({"endpoint": "ingest.convergent"}, ValueError),
+        # agents is a privacy control. A typo here used to turn the filter off
+        # with one log line, and every span in the process was sent.
+        ({"agents": "checkout"}, TypeError),
+        ({"agents": [1, 2]}, TypeError),
+        ({"agents": ["checkout", ""]}, ValueError),
+        # A path where a File belongs used to be swallowed, and the destination lost.
+        ({"destinations": ["/tmp/traces"]}, TypeError),
+        # The API package's provider has no add_span_processor, so it was ignored
+        # and the global lookup used instead: a provider the caller never chose.
+        ({"tracer_provider": trace.NoOpTracerProvider()}, TypeError),
+        ({"tracer_provider": "the global one please"}, TypeError),
+        ({"debug": "yes"}, TypeError),
+    ],
+    ids=[
+        "endpoint-not-a-url",
+        "agents-as-a-string",
+        "agents-not-names",
+        "agents-empty-name",
+        "destination-not-file-or-console",
+        "api-package-tracer-provider",
+        "tracer-provider-not-a-provider",
+        "debug-not-boolean",
+    ],
+)
+def test_one_bad_init_argument_raises(given: dict[str, Any], error: type[Exception]) -> None:
+    arguments: dict[str, Any] = {"api_key": _KEY, "endpoint": _ENDPOINT, "release": "r1"}
 
-
-def test_a_malformed_endpoint_environment_variable_raises_value_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An argument and its ``CONVERGENT_*`` variable get the same validation."""
-    monkeypatch.setenv("CONVERGENT_ENDPOINT", "ingest.convergent")
-
-    with pytest.raises(ValueError):
-        convergent.init(strict=True, api_key=_KEY, release="r1")
+    with pytest.raises(error):
+        convergent.init(strict=True, **{**arguments, **given})
 
 
 # --------------------------------------------------------------------------
-# init() raises: agents, which is a privacy control
+# init() raises: agents over the caps
 # --------------------------------------------------------------------------
-
-
-def test_agents_as_a_string_raises_type_error() -> None:
-    """The reason this policy exists. A typo here used to turn the filter off with
-    one log line, and every span in the process was sent."""
-    with pytest.raises(TypeError):
-        convergent.init(
-            strict=True,
-            api_key=_KEY,
-            endpoint=_ENDPOINT,
-            release="r1",
-            agents=cast(Any, "checkout"),
-        )
-
-
-def test_agents_holding_something_other_than_names_raises_type_error() -> None:
-    with pytest.raises(TypeError):
-        convergent.init(
-            strict=True, api_key=_KEY, endpoint=_ENDPOINT, release="r1", agents=cast(Any, [1, 2])
-        )
-
-
-def test_an_empty_agent_name_raises_value_error() -> None:
-    with pytest.raises(ValueError):
-        convergent.init(
-            strict=True, api_key=_KEY, endpoint=_ENDPOINT, release="r1", agents=["checkout", ""]
-        )
 
 
 def test_more_agent_names_than_the_cap_raises_value_error() -> None:
@@ -189,21 +183,8 @@ def test_an_agent_name_longer_than_the_cap_raises_value_error() -> None:
 
 
 # --------------------------------------------------------------------------
-# init() raises: destinations
+# init() raises: a destination the process cannot write
 # --------------------------------------------------------------------------
-
-
-def test_a_destination_that_is_not_a_file_or_console_raises_type_error() -> None:
-    """A path where a ``File`` belongs used to be swallowed, and the destination
-    lost."""
-    with pytest.raises(TypeError):
-        convergent.init(
-            strict=True,
-            api_key=_KEY,
-            endpoint=_ENDPOINT,
-            release="r1",
-            destinations=cast(Any, ["/tmp/traces"]),
-        )
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores permission bits")
@@ -229,66 +210,31 @@ def test_a_file_destination_in_a_read_only_directory_raises_os_error(tmp_path: P
 
 
 # --------------------------------------------------------------------------
-# init() raises: tracer_provider
+# init() raises: one bad environment variable
 # --------------------------------------------------------------------------
 
 
-def test_an_api_package_tracer_provider_raises_type_error() -> None:
-    """The API package's provider has no ``add_span_processor``, so it was ignored
-    and the global lookup used instead -- a provider the caller never chose."""
-    with pytest.raises(TypeError):
-        convergent.init(
-            strict=True,
-            api_key=_KEY,
-            endpoint=_ENDPOINT,
-            release="r1",
-            tracer_provider=cast(Any, trace.NoOpTracerProvider()),
-        )
-
-
-def test_a_tracer_provider_that_is_not_a_provider_raises_type_error() -> None:
-    with pytest.raises(TypeError):
-        convergent.init(
-            strict=True,
-            api_key=_KEY,
-            endpoint=_ENDPOINT,
-            release="r1",
-            tracer_provider=cast(Any, "the global one please"),
-        )
-
-
-# --------------------------------------------------------------------------
-# init() raises: debug, and the exporter environment variable
-# --------------------------------------------------------------------------
-
-
-def test_a_non_boolean_debug_raises_type_error() -> None:
-    with pytest.raises(TypeError):
-        convergent.init(
-            strict=True, api_key=_KEY, endpoint=_ENDPOINT, release="r1", debug=cast(Any, "yes")
-        )
-
-
-def test_a_debug_environment_value_outside_the_accepted_set_raises_value_error(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        # An argument and its CONVERGENT_* variable get the same validation.
+        ("CONVERGENT_ENDPOINT", "ingest.convergent"),
+        # "maybe" was read as false, so a caller who asked for debug logs got
+        # none and nothing said why.
+        ("CONVERGENT_DEBUG", "maybe"),
+        # "consle" was ignored silently, so the console destination never
+        # appeared. OpenTelemetry raises on an unknown OTEL_TRACES_EXPORTER too.
+        ("CONVERGENT_TRACES_EXPORTER", "consle"),
+    ],
+)
+def test_one_bad_environment_variable_raises_value_error(
+    monkeypatch: pytest.MonkeyPatch, variable: str, value: str
 ) -> None:
-    """``CONVERGENT_DEBUG=maybe`` was read as false, so a caller who asked for debug
-    logs got none and nothing said why."""
-    monkeypatch.setenv("CONVERGENT_DEBUG", "maybe")
+    monkeypatch.setenv("CONVERGENT_ENDPOINT", _ENDPOINT)
+    monkeypatch.setenv(variable, value)
 
     with pytest.raises(ValueError):
-        convergent.init(strict=True, api_key=_KEY, endpoint=_ENDPOINT, release="r1")
-
-
-def test_an_unknown_traces_exporter_environment_value_raises_value_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``consle`` was ignored silently, so the console destination never appeared.
-    OpenTelemetry raises on an unknown ``OTEL_TRACES_EXPORTER`` too."""
-    monkeypatch.setenv("CONVERGENT_TRACES_EXPORTER", "consle")
-
-    with pytest.raises(ValueError):
-        convergent.init(strict=True, api_key=_KEY, endpoint=_ENDPOINT, release="r1")
+        convergent.init(strict=True, api_key=_KEY, release="r1")
 
 
 # --------------------------------------------------------------------------
@@ -296,53 +242,48 @@ def test_an_unknown_traces_exporter_environment_value_raises_value_error(
 # --------------------------------------------------------------------------
 
 
-def test_a_file_name_that_climbs_out_of_its_directory_raises_value_error(tmp_path: Path) -> None:
-    """``filename`` is joined with ``path``, so ``../spans.jsonl`` writes prompts
-    somewhere other than the directory that was named."""
-    with pytest.raises(ValueError):
-        convergent.File(tmp_path, filename="../spans.jsonl")
-
-
-def test_an_absolute_file_name_raises_value_error() -> None:
-    """``Path.__truediv__`` drops its left side when the right is absolute, so an
-    absolute name discards ``path`` entirely."""
-    with pytest.raises(ValueError):
-        convergent.File("/data/traces", filename="/abs/spans.jsonl")
-
-
-def test_an_empty_file_name_raises_value_error(tmp_path: Path) -> None:
-    with pytest.raises(ValueError):
-        convergent.File(tmp_path, filename="")
+@pytest.mark.parametrize(
+    ("build", "error"),
+    [
+        # filename is joined with path, so ../spans.jsonl writes prompts somewhere
+        # other than the directory that was named.
+        (lambda tmp: convergent.File(tmp, filename="../spans.jsonl"), ValueError),
+        # Path.__truediv__ drops its left side when the right is absolute, so an
+        # absolute name discards path entirely.
+        (lambda _: convergent.File("/data/traces", filename="/abs/spans.jsonl"), ValueError),
+        (lambda tmp: convergent.File(tmp, filename=""), ValueError),
+        (lambda tmp: convergent.File(tmp, mode=cast(Any, True)), TypeError),
+        # "0600" is a string of digits, not permission bits, and fchmod would
+        # reject it after init() had reported a healthy setup.
+        (lambda tmp: convergent.File(tmp, mode=cast(Any, "0600")), TypeError),
+        (lambda tmp: convergent.File(tmp, mode=0o4755), ValueError),
+        # The Literal on stream holds no runtime weight, and an unknown name used
+        # to fail at export time, after init() reported a healthy setup.
+        (lambda _: convergent.Console(stream=cast(Any, "stdotu")), ValueError),
+        (lambda _: convergent.Console(pretty=cast(Any, "yes")), TypeError),
+    ],
+    ids=[
+        "file-name-climbs-out",
+        "absolute-file-name",
+        "empty-file-name",
+        "boolean-file-mode",
+        "non-integer-file-mode",
+        "file-mode-outside-permission-bits",
+        "unknown-console-stream",
+        "non-boolean-console-pretty",
+    ],
+)
+def test_one_bad_destination_argument_raises(
+    tmp_path: Path, build: Callable[[Path], object], error: type[Exception]
+) -> None:
+    with pytest.raises(error):
+        build(tmp_path)
 
 
 def test_a_bare_file_name_is_accepted(tmp_path: Path) -> None:
     """The counterpart. Several processes sharing one directory is what the
     argument exists for."""
     assert convergent.File(tmp_path, filename="worker-1.jsonl").filename == "worker-1.jsonl"
-
-
-def test_a_boolean_file_mode_raises_type_error(tmp_path: Path) -> None:
-    with pytest.raises(TypeError):
-        convergent.File(tmp_path, mode=cast(Any, True))
-
-
-def test_a_non_integer_file_mode_raises_type_error(tmp_path: Path) -> None:
-    """``"0600"`` is a string of digits, not permission bits, and ``fchmod`` would
-    reject it after ``init()`` had reported a healthy setup."""
-    with pytest.raises(TypeError):
-        convergent.File(tmp_path, mode=cast(Any, "0600"))
-
-
-def test_an_unknown_console_stream_raises_value_error() -> None:
-    """The ``Literal`` on ``stream`` holds no runtime weight, and an unknown name
-    used to fail at export time, after ``init()`` reported a healthy setup."""
-    with pytest.raises(ValueError):
-        convergent.Console(stream=cast(Any, "stdotu"))
-
-
-def test_a_non_boolean_console_pretty_raises_type_error() -> None:
-    with pytest.raises(TypeError):
-        convergent.Console(pretty=cast(Any, "yes"))
 
 
 # --------------------------------------------------------------------------
@@ -453,11 +394,6 @@ def test_a_processor_that_adopts_after_a_rejected_config_forgets_the_rejection()
 
     processor._unadopt()
     assert _core.live_status().reason == "missing_config"
-
-
-def test_a_file_mode_outside_permission_bits_raises_value_error(tmp_path: Path) -> None:
-    with pytest.raises(ValueError):
-        convergent.File(tmp_path, mode=0o4755)
 
 
 def test_a_destination_that_fails_after_its_probe_never_takes_down_another(

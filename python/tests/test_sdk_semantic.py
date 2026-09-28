@@ -252,6 +252,66 @@ def test_agent_runs_carry_their_name_and_version_as_span_attributes(
     resource = dict(span.resource.attributes)
     assert resource["convergent.deployment.id"] == "dep_test"
     assert "convergent.agent.name" not in resource
+    assert not any(key.startswith("convergent.agent.") for key in attributes)
+
+
+def test_agent_identity_fields_land_on_the_agent_span_alone(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    exporter = start_sdk()
+    tools = [
+        {"name": "lookup_order", "input_schema": {"order_id": "string"}},
+        {"name": "check_refund_policy", "input_schema": {"status": "string"}},
+    ]
+
+    @convergent.tool()
+    def lookup_order(order_id: str) -> str:
+        return order_id
+
+    @convergent.agent(
+        name="support-agent",
+        model="claude-opus-5",
+        system_instructions="Triage support tickets.",
+        tools=tools,
+    )
+    def support() -> str:
+        return lookup_order("A-1042")
+
+    support()
+
+    by_name = {span.name: dict(span.attributes or {}) for span in exporter.get_finished_spans()}
+    agent_attributes = by_name["invoke_agent support-agent"]
+    assert agent_attributes["convergent.agent.model"] == "claude-opus-5"
+    assert agent_attributes["convergent.agent.system_instructions"] == "Triage support tickets."
+    recorded_tools = agent_attributes["convergent.agent.tools"]
+    assert isinstance(recorded_tools, str)
+    assert json.loads(recorded_tools) == tools
+    assert not {
+        "gen_ai.request.model",
+        "gen_ai.system_instructions",
+        "gen_ai.tool.definitions",
+    } & set(agent_attributes)
+    tool_attributes = by_name["execute_tool lookup_order"]
+    assert not any(key.startswith("convergent.agent.") for key in tool_attributes)
+
+
+def test_agent_identity_fields_are_dropped_outside_an_agent_run(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    exporter = start_sdk()
+
+    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
+        with convergent.span(name="gpt", operation="model_call", model="claude-opus-5"):
+            pass
+
+    attributes = exporter.get_finished_spans()[-1].attributes
+    assert attributes is not None
+    assert not any(key.startswith("convergent.agent.") for key in attributes)
+    reports = [r.getMessage() for r in caplog.records if "ignored model=" in r.getMessage()]
+    assert len(reports) == 1
+    assert "system_instructions=" not in reports[0]
+    assert "tools=" not in reports[0]
 
 
 def test_nested_calls_stay_on_the_process_provider_and_share_the_trace(
@@ -303,8 +363,6 @@ def test_manual_spans_follow_otel_genai_names_and_attributes(
     assert agent_attributes["gen_ai.agent.name"] == "agent"
     assert agent_attributes["gen_ai.agent.version"] == "2026.07.24"
     assert agent_attributes["convergent.semantic.version"]
-    # Content goes to the standard GenAI fields, which is what our own ingest
-    # reads. There is no off switch and nothing is filtered.
     assert "always captured" in str(agent_attributes["gen_ai.input.messages"])
     assert "always captured" in str(agent_attributes["gen_ai.output.messages"])
     assert tool_span.name == "execute_tool lookup_account"
@@ -417,7 +475,7 @@ def test_start_time_attributes_reach_the_exported_span(
     answer()
 
     spans = {span.name: span.attributes or {} for span in exporter.get_finished_spans()}
-    assert spans["invoke_agent support-agent"]["convergent.session.id"] == "s-1"
+    assert spans["invoke_agent support-agent"]["session.id"] == "s-1"
     assert spans["gpt"]["turn"] == 3
     assert spans["gpt"]["cached"] is True
 
@@ -497,17 +555,130 @@ def test_nothing_convergent_is_left_in_otel_baggage(
     Cross-process grouping uses the trace id in ``traceparent`` instead."""
     start_sdk()
 
-    with convergent.span(name="agent", operation="agent_run"):
-        with convergent.span(name="gpt", operation="model_call"):
-            inside = dict(baggage.get_all())
+    with convergent.session("session-1"):
+        with convergent.span(name="agent", operation="agent_run"):
+            with convergent.span(name="gpt", operation="model_call"):
+                inside = dict(baggage.get_all())
     after = dict(baggage.get_all())
 
     assert [key for key in inside if key.startswith("convergent.")] == []
     assert [key for key in after if key.startswith("convergent.")] == []
 
 
+def test_session_scopes_sdk_and_library_spans_without_rewriting_their_id(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    outer_id = "  customer-thread-42  "
+
+    with convergent.session(outer_id):
+        exporter = start_sdk()
+        library = trace.get_tracer("example.library")
+        with convergent.span(name="outer", operation="agent_run"):
+            pass
+        with library.start_as_current_span("library-scoped"):
+            pass
+        with library.start_as_current_span(
+            "library-owned", attributes={"convergent.session.id": "library-value"}
+        ):
+            pass
+        with library.start_as_current_span(
+            "library-invalid", attributes={"convergent.session.id": ["not", "an", "id"]}
+        ):
+            pass
+        with convergent.session("inner"):
+            with convergent.span(name="inner", operation="agent_run"):
+                pass
+        with convergent.span(name="restored", operation="agent_run"):
+            pass
+
+    with convergent.span(name="outside", operation="agent_run"):
+        pass
+
+    attributes = {span.name: dict(span.attributes or {}) for span in exporter.get_finished_spans()}
+    assert attributes["invoke_agent outer"]["convergent.session.id"] == outer_id.strip()
+    assert attributes["library-scoped"]["convergent.session.id"] == outer_id.strip()
+    assert attributes["library-owned"]["convergent.session.id"] == "library-value"
+    assert attributes["library-invalid"]["convergent.session.id"] == outer_id.strip()
+    assert attributes["invoke_agent inner"]["convergent.session.id"] == "inner"
+    assert attributes["invoke_agent restored"]["convergent.session.id"] == outer_id.strip()
+    assert "convergent.session.id" not in attributes["invoke_agent outside"]
+
+
+def test_session_scope_is_inherited_by_async_work(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    exporter = start_sdk()
+
+    async def run() -> None:
+        async def model_call() -> None:
+            with trace.get_tracer("example.library").start_as_current_span("async-library"):
+                await asyncio.sleep(0)
+
+        with convergent.session("async-session"):
+            await asyncio.create_task(model_call())
+
+    asyncio.run(run())
+
+    attributes = exporter.get_finished_spans()[-1].attributes or {}
+    assert attributes["convergent.session.id"] == "async-session"
+
+
+def test_invalid_session_ids_do_not_raise_or_stamp_spans(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    exporter = start_sdk()
+
+    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
+        for session_id in (None, "   ", "x" * 129):
+            with convergent.session(cast(Any, session_id)):
+                with convergent.span(name="agent", operation="agent_run"):
+                    pass
+
+    assert all(
+        "convergent.session.id" not in (span.attributes or {})
+        for span in exporter.get_finished_spans()
+    )
+    reports = [
+        record for record in caplog.records if "ignored an invalid session id" in record.message
+    ]
+    assert len(reports) == 1
+
+
+def test_session_identity_keys_are_refused_in_context_attributes(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Session identity cannot silently become a filter-only context attribute."""
+    exporter = start_sdk()
+
+    with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
+        with convergent.span(
+            name="agent",
+            operation="agent_run",
+            context_attributes={
+                "session.id": "session-1",
+                "gen_ai.conversation.id": "session-1",
+                "convergent.session.id": "session-1",
+                "kept": "yes",
+            },
+        ):
+            pass
+
+    attributes = exporter.get_finished_spans()[-1].attributes or {}
+    assert attributes["convergent.attributes.kept"] == "yes"
+    for key in (
+        "convergent.attributes.session.id",
+        "convergent.attributes.gen_ai.conversation.id",
+        "convergent.attributes.convergent.session.id",
+    ):
+        assert key not in attributes
+    reports = [record for record in caplog.records if "use convergent.session()" in record.message]
+    assert len(reports) == 1
+
+
 @pytest.mark.parametrize("key", ["session.id", "gen_ai.conversation.id"])
-def test_setting_either_conversation_id_spelling_writes_both(
+def test_conversation_id_is_written_under_the_key_the_caller_used(
     start_sdk: Callable[..., InMemorySpanExporter], key: str
 ) -> None:
     exporter = start_sdk()
@@ -519,11 +690,10 @@ def test_setting_either_conversation_id_spelling_writes_both(
 
     from_handle, from_attributes = (span.attributes for span in exporter.get_finished_spans())
     assert from_handle is not None and from_attributes is not None
-    assert from_handle["gen_ai.conversation.id"] == "conv-1"
-    assert from_handle["convergent.session.id"] == "conv-1"
-    assert from_attributes["gen_ai.conversation.id"] == "conv-2"
-    assert from_attributes["convergent.session.id"] == "conv-2"
-    assert "session.id" not in from_handle and "session.id" not in from_attributes
+    assert from_handle[key] == "conv-1"
+    assert from_attributes[key] == "conv-2"
+    for other in {"session.id", "gen_ai.conversation.id", "convergent.session.id"} - {key}:
+        assert other not in from_handle and other not in from_attributes
 
 
 def test_reserved_attributes_cannot_be_overwritten(
@@ -559,9 +729,8 @@ def test_the_message_keys_are_reserved(
     write a scalar onto them.
 
     ``decode_messages`` returns ``None`` for anything that is not a list, so a
-    string here would be dropped downstream with a warning -- the silent
-    content loss this change exists to remove. The message keys stay the place
-    a chat span's content goes; only a tool call moved off them.
+    string here would be dropped downstream with a warning. The message keys
+    stay the place a chat span's content goes.
     """
     exporter = start_sdk()
 
@@ -582,10 +751,7 @@ def test_tool_content_goes_to_the_standard_tool_keys(
 ) -> None:
     """A tool call's arguments and result have GenAI keys of their own.
 
-    Recording them as chat messages meant only a reader that already knew the
-    span was ours could read them back, so every other producer's tool call
-    rendered as "Invalid arguments". A chat span still writes the message keys,
-    which is correct for it.
+    A chat span still writes the message keys, which is correct for it.
     """
     exporter = start_sdk()
 
@@ -634,7 +800,7 @@ def test_the_tool_call_id_is_recorded_under_the_standard_key(
 def test_an_oversized_tool_call_id_does_not_ship(
     start_sdk: Callable[..., InMemorySpanExporter],
 ) -> None:
-    """A call id is model output, so its length is the model's choice until bounded.
+    """A call id is model output, so its length is the model's choice unless bounded.
 
     ``set_tool_call_id`` deliberately ignores ``content``, so an unbounded id would
     be a way for a prompt-injected model to move text out of a process that turned
@@ -726,9 +892,7 @@ def test_the_semconv_operation_decides_the_span_shape(
     """A caller who writes the standard name gets the same span as one who writes ours.
 
     ``set_input`` has to route on the same value ingest classifies on, so ``span()``
-    resolves the operation once and every branch reads the resolved name. A caller
-    writing ``"execute_tool"`` used to get a span with no tool name, content in the
-    message keys, and a warning saying the operation maps to nothing.
+    resolves the operation once and every branch reads the resolved name.
     """
     exporter = start_sdk()
 
@@ -763,8 +927,6 @@ def test_an_unrecognized_operation_warns_rather_than_errors(
     assert unrecognized, "a custom operation is still reported"
     assert [r.levelno for r in unrecognized] == [logging.WARNING]
 
-    # An unusable *name* is a different class of mistake and stays at ERROR,
-    # because ingest will reject that span outright.
     caplog.clear()
     with caplog.at_level(logging.DEBUG, logger="convergent.sdk"):
         with convergent.span(name="", operation="agent_run"):
@@ -798,8 +960,6 @@ def test_content_is_written_to_the_standard_fields_unfiltered(
     assert secret in encoded, "the SDK does not scrub content"
     assert len(encoded) > 8_192, "the SDK does not bound content"
 
-    # The canonical message shape, which is what our own reader decodes. A bare
-    # JSON object here would be dropped by decode_messages().
     decoded = json.loads(str(attributes["gen_ai.output.messages"]))
     assert isinstance(decoded, list)
     assert decoded[0]["role"] == "assistant"
@@ -809,13 +969,12 @@ def test_content_is_written_to_the_standard_fields_unfiltered(
 def test_oversized_content_arrives_whole_and_parses(
     start_sdk: Callable[..., InMemorySpanExporter],
 ) -> None:
-    """No cap of ours, because the cap was the thing losing the content.
+    """No cap of ours.
 
     OpenTelemetry enforces an attribute cap by cutting the finished string, and a
-    messages value is JSON, so the cut landed mid-token and ``json.loads`` raised:
-    all of the content lost rather than the overflow, and large content is common
-    on real traffic. Content travels whole now, and what cannot stay on a span is
-    moved to the blob store at ingest.
+    messages value is JSON, so a cut lands mid-token and ``json.loads`` raises:
+    all of the content lost rather than the overflow. Content travels whole, and
+    what cannot stay on a span is moved to the blob store at ingest.
     """
     exporter = start_sdk()
     payload = "x" * 900_000
@@ -832,8 +991,7 @@ def test_oversized_content_arrives_whole_and_parses(
 def test_an_explicit_otel_length_limit_still_applies(monkeypatch: pytest.MonkeyPatch) -> None:
     """A caller who wants a cap sets OpenTelemetry's own variable and gets one.
 
-    Passing nothing to ``SpanLimits`` is what lets it read the environment, so
-    removing our floor must not remove the operator's ability to choose.
+    Passing nothing to ``SpanLimits`` is what lets it read the environment.
     """
     monkeypatch.setenv("OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT", "64")
     assert _core._span_limits().max_span_attribute_length == 64
@@ -847,9 +1005,8 @@ def test_an_object_whose_repr_raises_does_not_escape_set_input(
 ) -> None:
     """The one contract this SDK makes.
 
-    ``json.dumps(default=repr)`` runs the caller's ``__repr__``, and so did the
-    fallback meant to catch it, so a raising ``__repr__`` propagated out of
-    ``set_input`` into the caller's own code.
+    ``json.dumps(default=repr)`` runs the caller's ``__repr__``, so a raising
+    ``__repr__`` must not propagate out of ``set_input`` into the caller's code.
     """
     exporter = start_sdk()
 
@@ -936,8 +1093,6 @@ def test_an_operation_outside_the_table_is_recorded_word_for_word(
     """
     exporter = start_sdk()
 
-    # The decorator path, deliberately: the neighboring operation tests cover
-    # convergent.span().
     @convergent.observe(name="step", operation=cast(Any, operation))
     def step() -> None:
         return None
@@ -1006,9 +1161,7 @@ def test_reporting_is_bounded_by_reason_not_by_caller_input(
     """The report-once set must not grow with caller input.
 
     Keying it on the offending name would leak memory for a caller passing
-    ``f"agent-{uuid4()}"`` in a loop — the same high-cardinality mistake our docs
-    warn customers about, reproduced inside the SDK, and reachable only because we
-    now tolerate bad input rather than rejecting it.
+    ``f"agent-{uuid4()}"`` in a loop.
     """
     start_sdk()
     with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
@@ -1028,7 +1181,7 @@ def test_a_rejected_attribute_is_reported_and_dropped(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A reserved key or unsupported value type is dropped and logged, not raised
-    and not silently discarded — the old behavior was silent."""
+    and not silently discarded."""
     exporter = start_sdk()
     with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
         with convergent.span(name="agent", operation="agent_run") as handle:
@@ -1043,9 +1196,6 @@ def test_a_rejected_attribute_is_reported_and_dropped(
     assert "nested" not in attributes
     assert attributes["fine"] == "kept"
 
-    # Two reasons, not three reports: both reserved keys share the
-    # ``reserved_attribute`` reason, and reporting is keyed on the reason so the
-    # set cannot grow with caller input. Every attribute is still dropped.
     ignored = [r for r in caplog.records if "ignored the set_attribute()" in r.getMessage()]
     reasons = {r.getMessage().split(":")[1].strip() for r in ignored}
     assert len(ignored) == 2, f"one report per reason, got {len(ignored)}"
@@ -1072,15 +1222,12 @@ def test_no_public_call_raises_on_any_input(
         with convergent.span(name="agent", operation="agent_run", attributes=cast(Any, attributes)):
             pass
 
-    # A circular reference defeats json.dumps' ``default`` hook, so it exercises
-    # the last-resort fallback rather than the normal encode path.
     circular: dict[str, Any] = {}
     circular["self"] = circular
     with convergent.span(name="agent", operation="agent_run") as handle:
         handle.set_input(circular)
         handle.set_output(circular)
 
-    # The aliases delegate to observe(), so they must tolerate the same abuse.
     for name in hostile:
         assert convergent.agent(name=cast(Any, name))(lambda: "result")() == "result"
         assert convergent.tool(name=cast(Any, name))(lambda: "result")() == "result"
@@ -1116,7 +1263,7 @@ def test_agent_records_the_same_span_observe_would(
         "gen_ai.operation.name",
         "gen_ai.agent.name",
         "gen_ai.agent.version",
-        "convergent.session.id",
+        "session.id",
     ):
         assert first_attributes[key] == second_attributes[key]
     assert first_attributes["gen_ai.operation.name"] == "invoke_agent"
@@ -1216,7 +1363,7 @@ def test_current_span_writes_to_the_decorated_functions_own_span(
     assert span.name == "invoke_agent support-agent"
     assert json.loads(str(attributes["gen_ai.input.messages"]))[0]["role"] == "user"
     assert json.loads(str(attributes["gen_ai.output.messages"]))[0]["role"] == "assistant"
-    assert attributes["convergent.session.id"] == "s-1"
+    assert attributes["session.id"] == "s-1"
 
 
 def test_current_span_routes_tool_content_to_the_tool_keys(
@@ -1288,9 +1435,6 @@ def test_current_span_is_a_no_op_when_tracing_is_disabled(disabled_sdk: None) ->
     assert lookup() == "ok"
     assert isinstance(convergent.current_span(), _semantic._NoOpSpanHandle)
 
-    # A span someone else's provider opened does not arm the handle either:
-    # with the SDK unconfigured there is no provider to record through, so the
-    # guarded answer is the no-op one.
     provider = TracerProvider()
     with provider.get_tracer("test").start_as_current_span("theirs"):
         assert isinstance(convergent.current_span(), _semantic._NoOpSpanHandle)
@@ -1309,7 +1453,7 @@ def test_a_span_rooting_a_new_trace_inside_an_open_span_is_reported_once(
     """The pydantic-evals shape: a span nobody records sits around each case.
 
     A span started under one of those begins a new trace, so the suite span ends up
-    alone in a trace of its own and nothing said so until now. The parent here is
+    alone in a trace of its own. The parent here is
     built from the OpenTelemetry API rather than by running pydantic-evals,
     because the shape is what matters and it is two lines.
     """
