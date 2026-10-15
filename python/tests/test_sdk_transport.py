@@ -312,7 +312,7 @@ class _Collector:
                 self.send_response(status)
                 self.end_headers()
 
-            def log_message(self, *_: object) -> None: ...
+            def log_message(self, format: str, *args: object) -> None: ...
 
         self._server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self._server.serve_forever, daemon=True).start()

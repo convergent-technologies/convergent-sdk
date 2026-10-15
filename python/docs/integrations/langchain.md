@@ -3,11 +3,9 @@ title: LangChain
 description: Trace every chain, model call, and tool call LangChain runs.
 ---
 
-Every runnable LangChain invokes becomes a span inside your agent run, with no
-span code of your own around it. Instrument LangChain when you want the chains
-and the steps inside them in the trace. When the model calls are all you want,
-instrument the model client instead, which is what
-[Integrations](index.md) covers.
+Instrument LangChain to see each chain and its steps in the trace. If you only
+need the model calls, instrument the model client instead, as
+[Integrations](index.md) describes. Do not use both.
 
 ## Install
 
@@ -38,21 +36,6 @@ def answer(question: str) -> str:
     return str(chain.invoke({"question": question}).content)
 ```
 
-## What lands in the trace
-
-Under the `invoke_agent` span that `agent()` opened, the chain above arrives as
-three spans:
-
-- one span per chain, named after the runnable and suffixed `.workflow`
-  (`RunnableSequence.workflow` here), carrying `gen_ai.agent.name` set to the
-  runnable's name
-- one span per step inside it, named `execute_task` followed by the step's name,
-  carrying `gen_ai.task.name` and the step's inputs and outputs
-- one span per model call, named after the model class and suffixed `.chat`
-  (`ChatOpenAI.chat` here), carrying `gen_ai.request.model`,
-  `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`,
-  `gen_ai.response.finish_reasons`, and the messages
-
-A chain arrives as an agent run of its own, named after the runnable. A chain
-built with `|` is called `RunnableSequence` unless you name it, so name the ones
-you want to tell apart in the workspace.
+Each chain shows as its own agent run, named after the chain. A chain built
+with `|` is named `RunnableSequence` unless you give it a name. Name each chain
+you want to tell apart.

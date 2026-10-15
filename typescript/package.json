@@ -1,0 +1,56 @@
+{
+  "name": "convergent-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Record AI agent, model, and tool work with OpenTelemetry and Convergent.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/convergent-technologies/convergent-sdk.git",
+    "directory": "typescript"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "lint": "oxlint --deny-warnings src test tsdown.config.ts oxlint.config.ts && oxfmt --check src test tsdown.config.ts oxlint.config.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsdown",
+    "test": "node test/packed-consumer.mjs",
+    "prepack": "pnpm build"
+  },
+  "peerDependencies": {
+    "@opentelemetry/api": ">=1.9.0 <1.10.0"
+  },
+  "dependencies": {
+    "@opentelemetry/context-async-hooks": "~2.10.0",
+    "@opentelemetry/core": "~2.10.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "~0.221.0",
+    "@opentelemetry/otlp-exporter-base": "~0.221.0",
+    "@opentelemetry/resources": "~2.10.0",
+    "@opentelemetry/sdk-trace-base": "~2.10.0",
+    "@opentelemetry/sdk-trace-node": "~2.10.0"
+  },
+  "devDependencies": {
+    "@opentelemetry/api": "~1.9.1",
+    "@types/node": "^22.0.0",
+    "@typescript/native": "npm:typescript@^7.0.2",
+    "oxfmt": "0.67.0",
+    "oxlint": "1.82.0",
+    "oxlint-tsgolint": "7.0.2001",
+    "tsdown": "^0.23.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
+  }
+}

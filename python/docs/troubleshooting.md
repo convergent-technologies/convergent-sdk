@@ -1,13 +1,13 @@
 ---
 title: Troubleshooting
-description: Symptoms, and the checks that find each cause fastest.
+description: Symptoms, causes, and the fastest check for each.
 ---
 
-`init()` rejects a setup that cannot work: the problem is logged at ERROR and
-tracing is disabled, or the process stops at startup under `CONVERGENT_STRICT=1`.
-A setup that passes `init()` and still sends
-nothing looks like a working one from inside your application. Start with `check()`, which answers the first two
-questions on its own.
+`init()` rejects a setup that cannot work. It logs the problem at ERROR and
+disables tracing, or stops the process at startup under `CONVERGENT_STRICT=1`.
+A setup that passes `init()` but sends nothing looks normal from inside your
+application. Start with `check()`, which answers the first two questions on its
+own.
 
 ```python
 import convergent
@@ -15,8 +15,8 @@ import convergent
 print(convergent.check())
 ```
 
-Then make sure you can see the SDK's own warnings. It logs to the
-`convergent.sdk` logger at WARNING and ERROR, and delivery lines such as
+Next, make sure you can see the SDK's warnings. The SDK logs to the
+`convergent.sdk` logger at WARNING and ERROR. Delivery lines such as
 `Queue full, dropping Span.` come from OpenTelemetry's loggers. One root
 configuration catches both.
 
@@ -26,62 +26,65 @@ import logging
 logging.basicConfig(level=logging.WARNING)
 ```
 
-If your application raised the root logger above WARNING, none of it reaches
-you, because the `convergent.sdk` logger has no level of its own. Set
-`CONVERGENT_DEBUG=1`, or pass `debug=True` to `init()`, to give it one. The SDK
-writes nothing at DEBUG level, so that cannot make a working setup noisier. It
-covers the `convergent.sdk` logger only, so the OpenTelemetry lines still need the
-root logger or a level of their own on an `opentelemetry` logger.
+The `convergent.sdk` logger has no level of its own. If your application set
+the root logger above WARNING, you see none of these lines. To fix that, set
+`CONVERGENT_DEBUG=1` or pass `debug=True` to `init()`. This gives the logger a
+level of its own. The SDK writes nothing at DEBUG, so a working setup gets no
+noisier. The setting covers only the `convergent.sdk` logger. The OpenTelemetry
+lines still need the root logger, or a level set on an `opentelemetry` logger.
 
 ## Nothing is arriving
 
-Work down this list.
+Check these causes in order.
 
 ### The require_span_attributes= or reject_span_attributes= filter withheld them
 
-If `init(require_span_attributes=...)` is set, confirm the running requests are marked with
-`context_attributes=`. `require_span_attributes={"k": []}` sends nothing at all. If
-`init(reject_span_attributes=...)` is set, confirm the running requests do not carry a
-rejected pair. See
+If `init(require_span_attributes=...)` is set, confirm that the running
+requests are marked with `context_attributes=`. `require_span_attributes={"k": []}`
+sends nothing at all. If `init(reject_span_attributes=...)` is set, confirm
+that the running requests do not carry a rejected pair. See
 [Spans are missing under require_span_attributes= or reject_span_attributes=](#spans-are-missing-under-require_span_attributes-or-reject_span_attributes).
 
 ### Nothing was configured
 
 `init()` rejects a configuration with no key and no destination, or with no
-release: the problem is logged at ERROR, tracing is disabled, and `check()`
-prints `reason invalid_config`. Under `CONVERGENT_STRICT=1` the same problem
-raises at startup instead.
-`check()` prints `reason missing_config` when neither `init()` nor `install()`
-has run in the process, and also after a strict-mode raise, because a call that
-raised configured nothing and recorded nothing.
+release. It logs the problem at ERROR, disables tracing, and `check()` prints
+`reason invalid_config`. Under `CONVERGENT_STRICT=1`, the same problem raises
+at startup instead.
+
+`check()` prints `reason missing_config` in two cases:
+
+- Neither `init()` nor `install()` has run in the process.
+- A strict-mode call raised. A call that raised configured nothing and
+  recorded nothing.
 
 ### The traced code never ran
 
-An `agent()` function that was never called produces nothing. Put a print next
-to it.
+An `agent()` function that is never called produces nothing. Add a print next
+to it to confirm it runs.
 
 ### The process exited before the spans shipped
 
-Export happens on a background thread every five seconds. A normal interpreter
-exit still ships the queue, because `init()` registers an exit hook that drains
-it. A serverless freeze, `os._exit()`, or `SIGKILL` skips that hook, so call
-`flush()` before you exit there.
+The SDK exports on a background thread every five seconds. `init()` registers
+an exit hook that drains the queue, so a normal interpreter exit still ships
+it. A serverless freeze, `os._exit()`, or `SIGKILL` skips that hook. In those
+cases, call `flush()` before the process exits.
 
 ```python
 result = convergent.flush()
 print(result.ok, result.pending, result.dropped)
 ```
 
-> **Note:** `flush()` does not include a span that has not ended yet. A `flush()` written at the
-> end of an `agent()` body misses that run's own span, because the decorator ends the span after
-> the body returns. Flush after the function returns. One warning per process says so when it
-> happens.
+> **Note:** `flush()` skips a span that has not ended yet. The decorator ends
+> the span after the body returns, so a `flush()` at the end of an `agent()`
+> body misses that run's own span. Flush after the function returns. The SDK
+> logs one warning per process when this happens.
 
 ### The key was rejected
 
-A bad key logs `deployment registration failed` first. That line names no status
-code, so it reads like a version problem. `check()` tells the two apart in one
-call, because it prints a failed round trip with the status code.
+A bad key first logs `deployment registration failed`. That line names no
+status code, so it looks like a version problem. Run `check()` to tell the two
+apart. It prints a failed round trip with the status code.
 
 ```
 convergent: enabled
@@ -93,40 +96,40 @@ convergent: enabled
 ```
 
 The clearer line, `disabled because the collector rejected its credentials`,
-comes from the span exporter, so it appears only after the process tries to send
-a batch. A process that fails registration and then records nothing never prints
-it.
+comes from the span exporter. It appears only after the process tries to send
+a batch. A process that fails registration and then records nothing never
+prints it.
 
-Sending stays off for the life of the process. A corrected key in the
-environment does not re-arm it, and neither does a second `init()`. Restart the
-process after fixing the credential.
+Sending stays off for the life of the process. Neither a corrected key in the
+environment nor a second `init()` turns it back on. Fix the credential, then
+restart the process.
 
-A 401 with a key you know is good is usually `OTEL_EXPORTER_OTLP_HEADERS`. Its
-headers are added to every request on top of the key the SDK sets, so an
-`authorization` entry there replaces the credentials and every export comes back
+If you get a 401 with a key you know is good, check `OTEL_EXPORTER_OTLP_HEADERS`.
+Its headers are added to every request on top of the key the SDK sets. An
+`authorization` entry there replaces the credentials, and every export returns
 401. The SDK logs a warning naming that variable when it sees one, so leave it
-unset. `OTEL_EXPORTER_OTLP_TRACES_HEADERS` does the same and takes precedence over
-both, and the SDK does not warn about that one, so check for it too.
+unset. `OTEL_EXPORTER_OTLP_TRACES_HEADERS` has the same effect and takes
+precedence over both. The SDK does not warn about it, so check for it too.
 
 ### You are looking at the wrong workspace
 
 The API key decides which workspace receives the trace. Nothing errors if you
-are looking at another one. `check()` prints the organization the key belongs to
-on its `key` line.
+look at another workspace. The `key` line that `check()` prints names the
+organization the key belongs to.
 
 ## One run arrives as many traces
 
-Thirty seven model calls arrive as thirty eight traces, one for the agent and
-one for each call.
+For example, a run with thirty seven model calls arrives as thirty eight traces,
+one for the agent and one for each call.
 
-A span joins a trace by inheriting the active OpenTelemetry context. With no
-active span when a call starts, that call becomes the root of a new trace. There
-are three ways to get there.
+A span joins a trace by inheriting the active OpenTelemetry context. If no span
+is active when a call starts, that call becomes the root of a new trace. Three
+causes lead there.
 
 ### The model call is outside every span
 
-`init()` on its own records nothing. It configures where spans go, and something
-still has to open the span the model calls nest inside.
+`init()` alone records nothing. It configures where spans go. Your code still
+has to open the span that the model calls nest inside.
 
 ```python
 # Every call is its own trace.
@@ -136,7 +139,7 @@ for question in questions:
     litellm.completion(model="gpt-4.1-mini", messages=[{"role": "user", "content": question}])
 ```
 
-Wrap the run.
+Fix: wrap the run.
 
 ```python
 @convergent.agent(name="convergent-demo")
@@ -150,9 +153,9 @@ def answer_all(questions: list[str]) -> None:
 ### The call runs on another thread
 
 The OpenTelemetry context is a context variable. `asyncio` tasks inherit it, so
-`asyncio.gather` over async calls stays in one trace. A thread does not inherit
-it, so a call handed to `ThreadPoolExecutor` starts empty and roots a new trace.
-Carry the context across the boundary yourself.
+`asyncio.gather` over async calls stays in one trace. Threads do not inherit
+it. A call handed to `ThreadPoolExecutor` starts with an empty context and
+roots a new trace. Fix: carry the context across the boundary yourself.
 
 ```python
 from concurrent.futures import ThreadPoolExecutor
@@ -175,23 +178,24 @@ def answer_all(questions: list[str]) -> list[str]:
         return list(pool.map(ask, questions))
 ```
 
-Two processes that should share one trace use the standard `traceparent` header.
-Send it from the caller and extract it in the callee with OpenTelemetry's
-`TraceContextTextMapPropagator`. There is nothing Convergent specific about it.
+To share one trace across two processes, use the standard `traceparent`
+header. Send it from the caller and extract it in the callee with
+OpenTelemetry's `TraceContextTextMapPropagator`. Nothing about this is specific
+to Convergent.
 
 To confirm which trace a span landed in, print `convergent.current_trace()` at
-the top of the agent and again next to the model call. Two different ids means
+the top of the agent and again next to the model call. Two different ids mean
 the run split.
 
 ### A library opened a span that nothing records
 
-Some libraries open an OpenTelemetry span around each unit of work and have
-nothing configured to record it. `pydantic-evals` does this around every case.
-A span like that carries no valid id, so the next span under it cannot inherit
-one and becomes the root of a new trace. The span you opened around the whole run
-is then left alone in a trace of its own. The SDK reports this once per process,
-because it can see it happen: a span of ours started a new trace while another
-span of ours was still open.
+Some libraries open an OpenTelemetry span around each unit of work but have
+nothing configured to record it, e.g. `pydantic-evals` around every case. That
+span carries no valid id. The next span under it cannot inherit one, so it
+becomes the root of a new trace. The span you opened around the whole run is
+left alone in its own trace. The SDK detects this and reports it once per
+process, when one of its spans starts a new trace while another of its spans
+is still open.
 
 ```
 Convergent started a span as the root of a new trace while another Convergent
@@ -199,116 +203,122 @@ span was still open, so this run's spans are splitting into separate traces
 instead of joining one.
 ```
 
-Open the Convergent span outside that library's scope, or drop the wrapper span
-the library opens. A parent that a sampler dropped is not this problem, because
-it still carries a valid id and the child keeps the trace.
+Fix: open the Convergent span outside that library's scope, or drop the
+wrapper span the library opens. A parent dropped by a sampler is a different
+case. It still carries a valid id, so the child stays in the trace.
 
 ## Some agents are missing
 
-If you passed `agents=[...]`, an agent you did not name is dropped inside your
-process before anything is sent. The `agents` line `check()` prints is the
-server's list of agents it has recorded, not your local declaration, so compare
-the list in the `init()` call against the `gen_ai.agent.name` each span carries.
+If you passed `agents=[...]`, the SDK drops any agent you did not name inside
+your process, before anything is sent. The `agents` line in `check()` is the
+server's list of agents it has recorded, not your local list. Compare the list
+in your `init()` call against the `gen_ai.agent.name` on each span.
 
-An agent run that never names itself is also dropped, because a span with no
-parent is kept only by name.
+The SDK also drops an agent run that never names itself, because it keeps a
+span with no parent only by name.
 
 ## Spans are missing under require_span_attributes= or reject_span_attributes=
 
-The filters withhold a span inside your process, and per span they log
-nothing. Eight causes look the same from outside.
+The filters withhold spans inside your process and log nothing per span. Eight
+causes look the same from outside.
 
-The value does not match exactly. Comparison is by type and case: `1` matches
+The value does not match exactly. Comparison is by type and case. `1` matches
 neither `"1"` nor `True`, and `"Acme"` does not match `"acme"`. A float in
-`require_span_attributes=` or `reject_span_attributes=` warns at startup with `may never match`, because an
-exact comparison against a recorded float rarely holds.
+`require_span_attributes=` or `reject_span_attributes=` logs a startup warning
+with `may never match`, because an exact match against a recorded float rarely
+holds.
 
 The span's attribute holds a list or an enum member. Such a value never
-matches, so `reject_span_attributes=` cannot exclude the span and `require_span_attributes=` withholds it.
-Record the plain scalar instead: `.value` for an enum member.
+matches, so `reject_span_attributes=` cannot exclude the span and
+`require_span_attributes=` withholds it. Record the plain scalar instead, e.g.
+`.value` for an enum member.
 
-No source held a required key when the span ended. The decision reads the
+No source held a required key when the span ended. The filter reads the
 stamped `convergent.attributes.<key>` mark first, then the finished span's own
-attributes, then the resource attributes. Mark the request with
-`context_attributes=` on the `span()` call that wraps it, write the attribute
-onto the span, or set it on the resource.
+attributes, then the resource attributes. Fix it in one of three ways:
 
-The span was started from an explicitly passed `Context`, which misses the
-mark: the mark is read from that context, not from the ambient one, and it
-ends with the marked block. A resource or span attribute can still answer.
+- Mark the request with `context_attributes=` on the `span()` call that wraps it.
+- Write the attribute onto the span.
+- Set the attribute on the resource.
+
+The span was started from an explicitly passed `Context`, so it missed the
+mark. The SDK reads the mark from that context, not the ambient one, and the
+mark ends with the marked block. A resource or span attribute can still supply
+the key.
 
 The request crossed to a second process without its mark. The
-`context_attributes=` pairs stay in the process that set them, so the second
+`context_attributes=` pairs stay in the process that set them. The second
 service withholds its spans until it marks its own requests and sets its own
 filters.
 
-A span carried a rejected pair. `reject_span_attributes=` withholds on any one matching key,
-and it wins over `require_span_attributes=` for a pair named in both. A contradicting pair is
-logged at ERROR at startup with `reject_span_attributes= wins`.
+A span carried a rejected pair. `reject_span_attributes=` withholds a span on
+any one matching key. It wins over `require_span_attributes=` for a pair named
+in both. The SDK logs a contradicting pair at ERROR at startup with
+`reject_span_attributes= wins`.
 
-The span outgrew its attribute limit. Past the limit, 128 by default,
-OpenTelemetry evicts the span's oldest attribute, and the stamped key is
-among the oldest, so the span loses it and is withheld under `require_span_attributes=`. The
-span's `dropped_attributes` count is above zero then. Raise
+The span exceeded its attribute limit. The default limit is 128. Past it,
+OpenTelemetry evicts the span's oldest attribute. The stamped key is among the
+oldest, so the span loses it and `require_span_attributes=` withholds it. The
+span's `dropped_attributes` count is then above zero. Raise
 `OTEL_ATTRIBUTE_COUNT_LIMIT`, or record fewer attributes on one span.
 
-The decision itself failed. An exception while deciding withholds the span and
+The filter decision failed. An exception while deciding withholds the span and
 logs `Convergent could not decide whether a span may be sent` once per process.
 
 ## Too many agents are listed
 
-A per request string reached an agent name. Names must stay stable, like a class
-name. Put the varying part in an attribute.
+A string that varies per request reached an agent name. Keep names stable, like
+a class name, and put the varying part in an attribute.
 
-A mistake in a value you passed is logged once per reason, so a loop passing
-`f"agent-{uuid4()}"` produces one line rather than one per span, and only the first
-offending value reaches your logs.
+The SDK logs a bad value once per reason. A loop passing `f"agent-{uuid4()}"`
+produces one log line, not one per span, so only the first bad value reaches
+your logs.
 
 ## Traces have no version
 
 Deployment registration runs in the background after the first span, so a
 deployment can take a moment to appear. If it never appears, registration
-failed, which logs `deployment registration failed`. Traces still arrive, and
-they still carry your `release`. A missing `release` cannot be the cause, because
+failed and logged `deployment registration failed`. Traces still arrive and
+still carry your `release`. A missing `release` is not the cause, because
 `init()` rejects a configuration without one, and raises under strict mode.
 
 ## Prompts are missing from the spans
 
-Content written by a framework's own instrumentation has its own switch. Each
-framework's integration page names it.
+A framework's own instrumentation has its own switch for recording content.
+Each framework's integration page names it.
 
 ## An attribute did not appear
 
-`set_attribute()` drops any key starting with `convergent.` and the eight keys
-the SDK owns, and logs one line naming the key. The eight are
+`set_attribute()` drops any key that starts with `convergent.`, and the eight
+keys the SDK owns. It logs one line naming the dropped key. The eight keys are
 `gen_ai.operation.name`, `gen_ai.agent.name`, `gen_ai.agent.version`,
 `gen_ai.tool.name`, `gen_ai.input.messages`, `gen_ai.output.messages`,
 `gen_ai.tool.call.arguments`, and `gen_ai.tool.call.result`.
 
 ## The run has no model call in it
 
-An instrumentation package that writes onto a span that already ended loses
-everything it wrote, and logs `Setting attribute on ended span.` for each
-attribute. On litellm this is what `USE_OTEL_LITELLM_REQUEST_SPAN` prevents, and
-the litellm integration page covers it.
+An instrumentation package that writes onto an ended span loses everything it
+wrote. It logs `Setting attribute on ended span.` for each attribute. On
+litellm, `USE_OTEL_LITELLM_REQUEST_SPAN` prevents this. The litellm integration
+page covers it.
 
 ## Spans were recorded but never delivered
 
-A network export retries and can then discard the batch with an error log, and
-your application keeps running either way. That discard turns `FlushResult.ok`
-off and adds the batch's spans to `FlushResult.dropped`. A false `ok` or a
-`dropped` above zero means spans were lost, and a true `ok` means everything that
-flush drained was delivered. The exporter's error log says which batch failed.
+A network export retries, then can discard the batch with an error log. Your
+application keeps running either way. A discard turns `FlushResult.ok` off and
+adds the batch's spans to `FlushResult.dropped`. A false `ok` or a `dropped`
+above zero means spans were lost. A true `ok` means that flush delivered
+everything it drained. The exporter's error log names the failed batch.
 
-`FlushResult.dropped` counts spans thrown away since the last call, both the ones
-OpenTelemetry threw away because a queue was full and the ones an export failed to
-deliver. The queue is bounded at 2048 and `OTEL_BSP_MAX_QUEUE_SIZE` raises it.
+`FlushResult.dropped` counts spans thrown away since the last call. It includes
+spans OpenTelemetry dropped because a queue was full, and spans an export
+failed to deliver. The queue holds 2048 spans. Raise it with
+`OTEL_BSP_MAX_QUEUE_SIZE`.
 
-Rejected credentials count the same way. Once the collector has answered 401 or
-403 the SDK stops sending, and the refused batch and every batch it holds back
-after that turn `ok` off and land in `dropped`. The `disabled because the
-collector rejected its credentials` line names the cause, and `check()` prints
-the status code.
+Rejected credentials count the same way. Once the collector answers 401 or 403,
+the SDK stops sending. The refused batch and every later batch turn `ok` off
+and count in `dropped`. The `disabled because the collector rejected its
+credentials` line names the cause, and `check()` prints the status code.
 
 ## Seeing what you are sending
 
@@ -316,6 +326,6 @@ the status code.
 export CONVERGENT_TRACES_EXPORTER=console
 ```
 
-That adds a console destination rather than replacing the others, so you keep
-sending to Convergent while you read the spans. `convergent.File("/data/traces")`
-writes them to disk for the same reason.
+This adds a console destination and keeps the others, so you keep sending to
+Convergent while you read the spans. `convergent.File("/data/traces")` does the
+same but writes the spans to disk.

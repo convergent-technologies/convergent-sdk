@@ -50,7 +50,7 @@ can mean the filter withheld every span. It does not identify the cause by itsel
 A field missing from the rendered summary may exist in the raw span. Inspect the
 relevant raw attributes and the integration's documented format before reporting
 a missing field. Native GenAI names and supported aliases are listed in the
-[attribute reference](https://app.convergent.dev/docs/python-sdk/reference/attributes).
+[attribute reference](https://app.convergent.dev/docs/sdk/python/reference/attributes).
 A matching public SDK checkout's `python/docs/reference/attributes.md` also works.
 
 Convergent uses `convergent.session.id` first and falls back to

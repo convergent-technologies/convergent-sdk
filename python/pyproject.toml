@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "convergent-sdk"
-version = "0.0.9"
+version = "0.0.10"
 description = "Records your Python AI agent runs as OpenTelemetry spans and sends them to Convergent."
 readme = "README.md"
 license = "Apache-2.0"
@@ -30,6 +30,9 @@ dependencies = [
   "opentelemetry-api>=1.25.0",
   "opentelemetry-sdk>=1.25.0",
   "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+  # File uploads are zstd. Python 3.14's compression.zstd is missing from builds
+  # without libzstd, so the SDK does not rely on it.
+  "zstandard>=0.22",
 ]
 
 [project.urls]
@@ -51,7 +54,7 @@ dev = [
   "pytest>=9.0",
   "pytest-xdist>=3.8",
   "ruff>=0.15",
-  "pyright>=1.1.400",
+  "pyrefly>=1.3.2",
   "pydantic-ai-slim>=1.107.0",
   "opentelemetry-instrumentation>=0.64b0",
 ]
@@ -89,7 +92,6 @@ ignore = ["E501", "RUF022", "RUF100"]
 # which can leave the copied import block out of isort order.
 "tests/**" = ["RUF012", "RUF043", "I001"]
 
-[tool.pyright]
-include = ["src"]
-pythonVersion = "3.12"
-typeCheckingMode = "standard"
+[tool.pyrefly]
+project-includes = ["src"]
+python-version = "3.12"

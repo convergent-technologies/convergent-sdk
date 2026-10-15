@@ -36,6 +36,8 @@ EXPECTED = [
     # The union context_attributes= accepts on the decorators: the pairs, or a
     # callable resolved from the decorated function's own arguments per call.
     "ContextAttributes",
+    # The values origin= accepts on input_artifact() and output_artifact().
+    "ArtifactOrigin",
     "Report",
     "Note",
 ]

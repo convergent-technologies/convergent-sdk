@@ -12,6 +12,7 @@ from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
+from ._artifacts import ArtifactOrigin
 from ._check import Note, Report, check
 from ._core import FlushResult, Status, flush, init, tracer_provider
 from ._destinations import Console, Destination, File
@@ -56,6 +57,7 @@ __all__ = [
     "TraceRef",
     "SpanHandle",
     "ContextAttributes",
+    "ArtifactOrigin",
     "Report",
     "Note",
 ]

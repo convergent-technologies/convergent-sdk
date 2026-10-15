@@ -63,7 +63,7 @@ class _FakeRegistry:
             # A GET has no Content-Length, so the shared handler records an empty body.
             do_GET = do_POST
 
-            def log_message(self, *args: object) -> None:  # silence stdlib logging
+            def log_message(self, format: str, *args: object) -> None:  # silence stdlib logging
                 pass
 
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
@@ -112,7 +112,8 @@ def test_post_json_refuses_to_follow_a_redirect() -> None:
     """The Bearer key must never be re-sent to a redirect target: a 3xx is
     surfaced as a terminal error, not followed."""
     with _FakeRegistry([(302, {})]) as registry:
-        registry.responses[0] = (302, {"location": f"{registry.url}/elsewhere"})
+        redirect: dict[str, object] = {"location": f"{registry.url}/elsewhere"}
+        registry.responses[0] = (302, redirect)
         with pytest.raises(RegistrationError):
             post_json(
                 f"{registry.url}/v1/deployments",
@@ -153,7 +154,8 @@ def test_get_json_refuses_to_follow_a_redirect() -> None:
     """Same guarantee as the POST: the Bearer key is never re-sent to a redirect
     target, so a 3xx is surfaced as an error instead of being followed."""
     with _FakeRegistry([(302, {})]) as registry:
-        registry.responses[0] = (302, {"location": f"{registry.url}/elsewhere"})
+        redirect: dict[str, object] = {"location": f"{registry.url}/elsewhere"}
+        registry.responses[0] = (302, redirect)
         with pytest.raises(RegistrationError):
             get_json(f"{registry.url}/v1/check", headers={"Authorization": "Bearer secret"})
 

@@ -3,9 +3,8 @@
   "pages": [
     "index",
     "agent-skill",
-    "opentelemetry",
     "integrations",
-    "instrument",
+    "opentelemetry",
     "---Reference---",
     "configuration",
     "reference/api",

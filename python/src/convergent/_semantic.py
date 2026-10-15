@@ -16,6 +16,7 @@ import inspect
 import json
 import logging
 import os
+import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -34,7 +35,7 @@ from opentelemetry.trace import (
     format_trace_id,
 )
 
-from . import _policy, _processors
+from . import _artifacts, _policy, _processors
 
 logger = logging.getLogger("convergent.sdk")
 
@@ -71,6 +72,11 @@ ContextAttributes = (
 #: The tracer name every span the SDK opens carries in its instrumentation
 #: scope. ``set_context_attributes`` recognizes the SDK's own spans by it.
 _TRACER_NAME = "convergent.sdk"
+
+#: Spans :func:`span` opened, which release their file copies when they end.
+#: Other code can open spans under the tracer name above, so it does not prove
+#: ownership.
+_opened_spans: weakref.WeakSet[Span] = weakref.WeakSet()
 
 _OPERATIONS: dict[str, str] = {
     "agent_run": "invoke_agent",
@@ -278,6 +284,63 @@ class SpanHandle:
             return
         self._span.set_attribute("gen_ai.tool.call.id", call_id)
 
+    def input_artifact(
+        self,
+        source: bytes | str | os.PathLike[str],
+        *,
+        filename: str | None = None,
+        media_type: str | None = None,
+        origin: _artifacts.ArtifactOrigin | None = None,
+    ) -> None:
+        """Record a file this span read: a document given to the agent, content
+        handed to a model, or a file a tool loaded.
+
+        ``source`` is a local path or the bytes themselves. The file is copied
+        and hashed now, so later changes to it do not reach Convergent, and the
+        copy uploads in the background once the span ends and passes the span
+        filters. ``filename`` defaults to the path's name, and ``media_type`` to
+        ``application/octet-stream``. ``origin`` says who supplied the file: an end
+        user, the agent's own code, a model, a tool, or any other system
+        (``external``). Left out or outside those five values, it is unknown.
+        A filename over 1,024 characters is left off. Never raises; a file that
+        cannot be read, is over 16 MiB, or has a ``media_type`` that is not
+        printable ASCII of at most 255 characters is logged and counted in
+        ``convergent.artifacts.dropped``.
+        """
+        self._attach_artifact("input", source, filename, media_type, origin)
+
+    def output_artifact(
+        self,
+        source: bytes | str | os.PathLike[str],
+        *,
+        filename: str | None = None,
+        media_type: str | None = None,
+        origin: _artifacts.ArtifactOrigin | None = None,
+    ) -> None:
+        """Record a file this span produced, such as the agent's deliverable or a
+        file a tool wrote. Takes what :meth:`input_artifact` takes."""
+        self._attach_artifact("output", source, filename, media_type, origin)
+
+    def _attach_artifact(
+        self,
+        role: _artifacts.Role,
+        source: object,
+        filename: str | None,
+        media_type: str | None,
+        origin: _artifacts.ArtifactOrigin | None,
+    ) -> None:
+        if self._span not in _opened_spans:
+            _report_once(
+                "artifact_foreign_span",
+                "Convergent ignored a file recorded on a span it did not open, because "
+                "nothing would release the copy if the span is withheld. Record files "
+                "on a span() or observe() span.",
+            )
+            return
+        _artifacts.attach(
+            self._span, role, source, filename=filename, media_type=media_type, origin=origin
+        )
+
 
 class _NoOpSpanHandle:
     trace_id: str | None = None
@@ -297,6 +360,26 @@ class _NoOpSpanHandle:
         pass
 
     def set_tool_call_id(self, call_id: str) -> None:
+        pass
+
+    def input_artifact(
+        self,
+        source: bytes | str | os.PathLike[str],
+        *,
+        filename: str | None = None,
+        media_type: str | None = None,
+        origin: _artifacts.ArtifactOrigin | None = None,
+    ) -> None:
+        pass
+
+    def output_artifact(
+        self,
+        source: bytes | str | os.PathLike[str],
+        *,
+        filename: str | None = None,
+        media_type: str | None = None,
+        origin: _artifacts.ArtifactOrigin | None = None,
+    ) -> None:
         pass
 
 
@@ -632,6 +715,7 @@ def span(
     # Attached before the span starts, so the stamper sees the pairs on this
     # span too, and detached when the block exits, which is the pairs' lifetime.
     token = _processors.attach_context(context_pairs) if context_pairs else None
+    current: Span | None = None
     try:
         with tracer.start_as_current_span(
             span_name,
@@ -639,6 +723,7 @@ def span(
             record_exception=False,
             set_status_on_exception=False,
         ) as current:
+            _opened_spans.add(current)
             _warn_on_split_trace(current, open_before)
             handle = SpanHandle(current, operation=operation_name)
             try:
@@ -657,6 +742,8 @@ def span(
         _open_span_count.set(max(_open_span_count.get() - 1, 0))
         if token is not None:
             _processors.detach_context(token)
+        if current is not None:
+            _artifacts.release(current)
 
 
 def _warn_on_split_trace(current: Span, open_before: int) -> None:

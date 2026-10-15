@@ -4,6 +4,23 @@ Each released version has a `## <version>` section here, and the release
 workflow publishes that section as the GitHub Release notes. The newest
 section may describe a version whose tag does not exist yet.
 
+## 0.0.10
+
+- `input_artifact()` and `output_artifact()` on a span record a file the span
+  read or produced, from a local path or bytes. The SDK copies and hashes the
+  file when you call, lists it on the span by its `sha256:` digest, and uploads
+  the copy in the background after the span ends and passes the span filters.
+  `origin=` says who supplied the file: `user`, `agent`, `model`, `tool`, or
+  `external`. A file your workspace already holds is not sent again, even from
+  a new process. Any file is sent. Without `media_type=`, a file goes as
+  `application/octet-stream`. Uploads are zstd-compressed, except images and
+  archives that are already compressed, so the SDK now depends on `zstandard`.
+  See
+  [the API reference](docs/reference/api.md#spanhandle).
+- `flush()` takes `uploads=True` to wait for those uploads, up to
+  `upload_timeout_ms`. `FlushResult` reports `pending_uploads` and
+  `dropped_uploads`.
+
 ## 0.0.9
 
 - Spans upload with `opentelemetry-exporter-otlp-proto-http` 1.45 and later.

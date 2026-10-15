@@ -1,26 +1,27 @@
 ---
-title: Attribute support
+title: Attributes
 description: Attribute read order, accepted values, span kinds, and custom fields.
 ---
 
 Convergent reads the attributes on each span and its OpenTelemetry resource.
-The tables below list each field and its read order. An attribute name in
-these tables is a key your instrumentation can send. It is not a Python SDK
-argument. The SDK's recording methods are in the [API reference](api.md).
+The tables below list each field and the order Convergent reads its keys in.
+Each attribute name is a key your instrumentation can send, not a Python SDK
+argument. For the SDK's recording methods, see the [API reference](api.md).
 
 ## Attribute precedence
 
-Read the numbered entries for each field from top to bottom. Convergent selects the first present key,
-then checks its value. A present key with an invalid value blocks every later
-key for that field. A missing key allows the next key to be tried.
+For each field, Convergent tries the numbered keys from top to bottom. It
+selects the first key that is present, then checks its value. If that value is
+invalid, the field is empty, and Convergent does not try later keys. A missing
+key moves on to the next one.
 
 For example, a span with `convergent.input_tokens="bad"` and
 `gen_ai.usage.input_tokens=12` has no input token count. It does not use `12`.
 With the first key absent, its input token count is `12`.
 
-For direct attributes, the same rule applies to zero, false, null, and empty values. Presence decides
-which value to check; the [value rules](#accepted-values) decide whether it is
-usable. For example, `convergent.stream=False` wins over
+For direct attributes, zero, false, null, and empty values count as present.
+Presence decides which value to check. The [value rules](#accepted-values)
+decide whether it is usable. For example, `convergent.stream=False` wins over
 `gen_ai.is_streaming=True` and records `False`.
 
 ```python
@@ -31,12 +32,16 @@ for key in keys_in_read_order:
 return None
 ```
 
-All keys below are span attributes unless marked **resource**. **Agent only**
-means the key applies only to an agent run. `pydantic-ai` means the additional
-tracer rules in [Events and framework attributes](#events-and-framework-attributes)
-apply. An instrumentation scope identifies the tracer that recorded a span.
+Keys in the tables are span attributes unless marked **resource**. The marks
+mean:
+
+- **Agent only**: the key applies only to an agent run.
+- `pydantic-ai`: the extra tracer rules in
+  [Events and framework attributes](#events-and-framework-attributes) apply.
+
 Direct aliases such as `operation.cost`, `session.id`, and `llm.model_name`
-work regardless of the tracer that recorded the span.
+work whichever tracer recorded the span. The tracer is identified by the
+span's instrumentation scope.
 
 ### Operation and identity
 
@@ -67,8 +72,8 @@ work regardless of the tracer that recorded the span.
 | Release | 1 | `convergent.release` |
 |  | 2 | `service.version` (resource) |
 
-The reported agent version is producer metadata. Read the release from
-`convergent.release` or the resource's `service.version`.
+The reported agent version is metadata from the producer, not the release.
+The release comes from `convergent.release` or the resource's `service.version`.
 
 For example, a resource with `convergent.agent.name="support-agent"` wins over
 a span with `gen_ai.agent.name="billing-agent"`. A span's
@@ -148,9 +153,11 @@ a span with `gen_ai.agent.name="billing-agent"`. A span's
 | Cache read input tokens | 1 | `convergent.cache_read_input_tokens` |
 |  | 2 | `gen_ai.usage.cache_read.input_tokens` |
 |  | 3 | `gen_ai.usage.cache_read_input_tokens` |
+|  | 4 | `convergent.llm.cache_read_tokens` |
 | Cache creation input tokens | 1 | `convergent.cache_creation_input_tokens` |
 |  | 2 | `gen_ai.usage.cache_creation.input_tokens` |
 |  | 3 | `gen_ai.usage.cache_creation_input_tokens` |
+|  | 4 | `convergent.llm.cache_write_tokens` |
 | Cost in US dollars | 1 | `convergent.cost_usd` |
 |  | 2 | `gen_ai.usage.cost` |
 |  | 3 | `operation.cost` |
@@ -159,11 +166,13 @@ a span with `gen_ai.agent.name="billing-agent"`. A span's
 
 ## Accepted values
 
-These rules apply after reading the first present key. They describe received telemetry.
-The SDK's own methods may accept a narrower input type or serialize a value
-before sending it. A rejected value leaves its field empty. A rejected total
-token count may still be calculated from input and output counts. A rejected
-value may remain in custom attributes if it is valid JSON.
+These rules apply to the first present key, as Convergent receives it. The
+SDK's own methods may accept a narrower input type, or serialize a value before
+sending it. A rejected value leaves its field empty, with two exceptions:
+
+- A rejected total token count can still be calculated from the input and
+  output counts.
+- A rejected value can stay in custom attributes if it is valid JSON.
 
 | Fields | Accepted value | Example and result |
 | --- | --- | --- |
@@ -177,26 +186,29 @@ value may remain in custom attributes if it is valid JSON.
 | Finish reasons | A string or a list of strings. | `"stop"` becomes `["stop"]`; `[]` stays `[]`; `[1]` is rejected. |
 | Tool arguments/result and general input/output | A valid JSON value. Strings stay strings. | `'{}'` stays the string `'{}'`; `{"id": 7}` stays an object; null stays null. |
 
-Time to first chunk uses seconds: `0.25` means 250 milliseconds. Convergent
-keeps the supplied number without converting units. This follows the
-[OpenTelemetry time-to-first-token unit](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-metrics.md).
+Time to first chunk is in seconds, so `0.25` means 250 milliseconds.
+Convergent keeps the number as sent and does not convert units. This matches
+the [OpenTelemetry time-to-first-token unit](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-metrics.md).
 
 ### Total token count
 
-A valid supplied total token count wins even if it differs from the sum.
-Without one, Convergent adds the valid input and output counts. One known count
-is enough; with neither, the total is absent. A sum above `2**63 - 1` is absent.
+A valid total token count wins, even if it differs from the sum. Without one,
+Convergent adds the valid input and output counts. One known count is enough.
+With neither, the total is absent. A sum above `2**63 - 1` is also absent.
 
 For example, input `12`, output `3`, and total `99` produce total `99`.
-Changing total to `"bad"` produces total `15`. This calculation uses the input
-and output fields; it does not try a later total-token alias.
+Changing total to `"bad"` produces total `15`. The calculation uses the input
+and output fields. It does not try a later total-token alias.
 
 ### System instructions
 
-System instructions accept a string or a list. Plain text becomes one system
-message. A list of text parts becomes one system message containing those
-parts. A list of message objects with string `role` values keeps its structure.
-JSON strings containing these lists follow the same rules.
+System instructions accept a string or a list:
+
+- Plain text becomes one system message.
+- A list of text parts becomes one system message containing those parts.
+- A list of message objects with string `role` values keeps its structure.
+
+A JSON string that contains one of these lists follows the same rules.
 
 | Input | Recorded messages |
 | --- | --- |
@@ -230,15 +242,16 @@ become these recorded messages:
 ```
 
 A list that matches neither message objects nor text parts becomes literal
-text. A native list is serialized to compact JSON first. An input string
-retains its original text.
+text. A native list is first serialized to compact JSON. An input string keeps
+its original text.
 
 ### Tool definitions
 
 Tool definitions accept a list or a JSON string that decodes to a list.
-Convergent sorts the list by each item's top-level string `name`, then by JSON text with sorted object keys. Items without such a name use an empty name
-for sorting. Received lists can contain JSON values other than objects; the
-SDK's typed `tools=` argument uses mappings.
+Convergent sorts the list by each item's top-level string `name`, then by its
+JSON text with sorted object keys. An item without such a name sorts as an
+empty name. Received lists can contain JSON values other than objects. The
+SDK's typed `tools=` argument takes mappings.
 
 For example, `[{"name":"z"},{"name":"a"}]` becomes
 `[{"name":"a"},{"name":"z"}]`. `[]` stays an empty list. A missing value,
@@ -246,19 +259,22 @@ an object, or `"broken"` provides no tools.
 
 ### JSON limits
 
-JSON values must contain only null, booleans, finite numbers, strings, lists,
-and objects with string keys. Values are limited to 16 MiB of compact UTF-8
-JSON, 64 nesting levels, and 65,536 combined list items and object entries.
-Integers must fit within 16,384 bits and serialize successfully. Invalid
-Unicode strings are rejected.
+JSON values may contain only null, booleans, finite numbers, strings, lists,
+and objects with string keys. These limits apply:
 
-The Python value `{"enabled": False, "limits": [0, 2]}` can be serialized to
-JSON. A set, an object with an integer key, or a list containing NaN is invalid. These limits also apply
-to custom values and decoded messages and tools.
+- At most 16 MiB of compact UTF-8 JSON.
+- At most 64 nesting levels.
+- At most 65,536 list items and object entries combined.
+- Integers must fit within 16,384 bits and serialize successfully.
+- Invalid Unicode strings are rejected.
+
+For example, the Python value `{"enabled": False, "limits": [0, 2]}` is valid.
+A set, an object with an integer key, or a list containing NaN is invalid. The
+same limits apply to custom values and to decoded messages and tools.
 
 ## Operation names
 
-The operation determines which kind of span Convergent records.
+The operation decides which kind of span Convergent records.
 
 | Operation | Span kind |
 | --- | --- |
@@ -269,18 +285,22 @@ The operation determines which kind of span Convergent records.
 
 The SDK translates `operation="agent_run"` to `invoke_agent`, `model_call` to
 `chat`, and `tool_call` to `execute_tool` before export. See the full
-[SDK operation list](api.md#operations). Writing `toolcall` as a raw operation
-keeps a generic span with operation `toolcall`.
+[SDK operation list](api.md#operations). A raw `toolcall` operation records a
+generic span with operation `toolcall`.
 
-Without a valid operation, Convergent checks for a tool name, then an agent
-name, then a requested model or output messages. These select tool, agent, and
-model spans respectively. With none, it records a generic span. The `pydantic-ai`
-agent-name rule below also applies before these checks.
+Without a valid operation, Convergent infers the kind in this order:
+
+1. A tool name makes a tool call.
+2. An agent name makes an agent run.
+3. A requested model or output messages make a model call.
+4. Otherwise, the span is generic.
+
+The `pydantic-ai` agent-name rule below applies before these checks.
 
 ### `litellm` operation values
 
-For tracers named `litellm` or beginning `litellm.`, Convergent also reads these
-operation values case-insensitively. This conversion applies only to
+For tracers named `litellm` or starting with `litellm.`, Convergent also
+reads these operation values, ignoring case. This conversion applies only to
 `gen_ai.operation.name`.
 
 | What the producer writes | Operation |
@@ -289,9 +309,9 @@ operation values case-insensitively. This conversion applies only to
 | `atext_completion` | `text_completion` |
 | `embedding`, `aembedding` | `embeddings` |
 
-The resulting values `chat`, `text_completion`, `embeddings`, and
-`execute_tool` are also accepted case-insensitively for these tracers. Other
-values stay unchanged. `call_mcp_tool` therefore remains generic.
+For these tracers, Convergent also accepts `chat`, `text_completion`,
+`embeddings`, and `execute_tool` in any case. Other values stay unchanged, so
+`call_mcp_tool` remains generic.
 
 For example, `completion` from `litellm.proxy` becomes a model call. The same
 operation from `my_app` or `litellm_proxy` remains generic. A direct cost alias
@@ -300,8 +320,7 @@ such as `litellm.cost.total=0.25` still provides cost for all three tracers.
 ## Fields kept for each span kind
 
 Every span can carry agent name/version, session, release, parent trajectory
-ID, token counts, cost, and error type. Its remaining fields depend
-on its kind.
+ID, token counts, cost, and error type. Its other fields depend on its kind.
 
 | Kind | Fields |
 | --- | --- |
@@ -310,13 +329,15 @@ on its kind.
 | Tool call | Tool name, call ID, type, description, arguments, and result. |
 | Generic span | Operation and general input/output. |
 
-For example, `gen_ai.response.model="gpt-4o-mini"` is a response model on a model
-call. On an agent run, that selected value remains a custom attribute under
-its original key. A model call's `gen_ai.request.temperature=0.2` becomes
-request parameter `temperature=0.2`. Request parameters are all
-`gen_ai.request.*` keys except the model, and accept JSON values.
+For example, `gen_ai.response.model="gpt-4o-mini"` is a response model on a
+model call. On an agent run, the same value stays a custom attribute under its
+original key.
 
-Numeric `gen_ai.usage.details.*` values use the cost value rules and remain
+Request parameters are all `gen_ai.request.*` keys except the model, and they
+accept JSON values. On a model call, `gen_ai.request.temperature=0.2` becomes
+request parameter `temperature=0.2`.
+
+Numeric `gen_ai.usage.details.*` values follow the cost value rules and stay
 usage details on every kind. For example, `gen_ai.usage.details.requests=2`
 records detail `requests=2`. Details do not create input or output token
 counts. The reasoning-token alias in the table can also supply that count.
@@ -324,8 +345,8 @@ counts. The reasoning-token alias in the table can also supply that count.
 ## Events and framework attributes
 
 These rules apply only to tracers named `pydantic_ai`, `pydantic-ai`, or a
-dotted child such as `pydantic_ai.agent`. They apply at their positions in the
-read-order tables, after earlier direct attributes.
+dotted child such as `pydantic_ai.agent`. Each rule applies at its position in
+the read-order tables, after any earlier direct attributes.
 
 | Field | Event or attribute used |
 | --- | --- |
@@ -340,33 +361,37 @@ read-order tables, after earlier direct attributes.
 
 For example, two user events with contents `"First"` and `"Second"` produce
 one user message containing `"First"`. Choice events with finish reasons
-`"length"` then `"stop"` produce `["stop"]`. This is field extraction, not a
-concatenation of all events.
+`"length"` then `"stop"` produce `["stop"]`. Convergent picks one event per
+field. It does not concatenate events.
 
-With no valid operation, an OpenTelemetry INTERNAL span named `agent support`
-with `agent.name="support"` is an agent run for these tracers. This rule decides
-the kind; `agent.name` itself is not an agent-name alias in the table.
+For these tracers, an OpenTelemetry INTERNAL span with no valid operation,
+named `agent support`, with `agent.name="support"`, is an agent run. This rule
+decides only the kind. `agent.name` is not an agent-name alias in the table.
 
 Outside these tracers, events and `model_name` do not supply these fields.
 For example, `model_name="gpt-4o"` on a named agent run from `my_app` stays
-custom; `llm.model_name="gpt-4o-mini"` supplies its model. With a matching tracer,
-a non-null invalid `model_name` blocks `llm.model_name`. A missing or null
-`model_name` supplies no value, so `llm.model_name` is still tried. These
-framework extraction rules only supply a value when their result is non-null.
+custom, and `llm.model_name="gpt-4o-mini"` supplies its model. With a matching
+tracer, a non-null invalid `model_name` blocks `llm.model_name`. A missing or
+null `model_name` supplies no value, so Convergent still tries
+`llm.model_name`. These framework rules supply a value only when their result
+is non-null.
 
 ## Custom attributes
 
-Unread attributes with valid JSON values are kept in `custom`, except for
-recognized aliases and bookkeeping keys listed below. Their values keep their
-JSON types. JSON-looking strings are not decoded.
+Convergent keeps attributes it does not read as fields in `custom`, if their
+values are valid JSON. Recognized aliases and the bookkeeping keys listed below
+are the exceptions. Values keep their JSON types. Strings that look like JSON
+are not decoded.
+
 The receiver strips `convergent.attributes.` and `convergent.custom.` from
 custom keys. Other keys keep their spelling, including other `convergent.`
-keys. The SDK's `attributes=` and `set_attribute()` methods separately reject
-keys that start with `convergent.`.
+keys. Separately, the SDK's `attributes=` and `set_attribute()` reject keys
+that start with `convergent.`.
 
-Convergent reads resource attributes first, then span attributes. Within either set of
-attributes, a prefixed key wins over a bare key. If both prefixes occur in that
-same set, `convergent.custom.` wins over `convergent.attributes.`.
+Convergent reads resource attributes first, then span attributes, so a span
+value wins. Within either set, a prefixed key wins over a bare key. If both
+prefixes occur in the same set, `convergent.custom.` wins over
+`convergent.attributes.`.
 
 | Input | Custom result |
 | --- | --- |
@@ -376,25 +401,25 @@ same set, `convergent.custom.` wins over `convergent.attributes.`.
 | Span `convergent.attributes.team="billing"` and `convergent.custom.team="support"` | `team="support"` |
 | Span `acme.config='{"enabled":true}'` | `acme.config` remains a string. |
 
-A selected invalid field can remain custom when its value is valid JSON.
-For example, `convergent.input_tokens="bad"` records no input token count but
-keeps the string under that custom key. NaN cannot remain custom because it
+A selected field with an invalid value stays custom if the value is valid
+JSON. For example, `convergent.input_tokens="bad"` records no input token count
+but keeps the string under that custom key. NaN cannot stay custom because it
 is not valid JSON. A selected field that does not belong to the span's kind
-can also remain custom, as in the response-model example above.
+also stays custom, as in the response-model example above.
 
-Recognized aliases that lose to an earlier key are not copied to custom.
-For example, valid `convergent.input_tokens=12` and
-`gen_ai.usage.input_tokens=99` record count `12` without a custom copy of `99`.
-SDK bookkeeping attributes `convergent.semantic.version` and
-`convergent.content.source` are omitted. `convergent.execution.id` is omitted
-when it equals the span's trace ID.
+Recognized aliases that lose to an earlier key are not copied to custom. For
+example, valid `convergent.input_tokens=12` and `gen_ai.usage.input_tokens=99`
+record count `12`, with no custom copy of `99`. Convergent omits the SDK
+bookkeeping attributes `convergent.semantic.version` and
+`convergent.content.source`. It omits `convergent.execution.id` when it equals
+the span's trace ID.
 
 ### What is not renamed
 
-A key absent from the read-order tables does not become a field
-unless one of the event or prefix rules above applies. For example,
-`llm.token_count.prompt=12` and `traceloop.entity.name="support-agent"` remain
-custom attributes; they do not supply input tokens or an agent name.
+A key that is not in the read-order tables does not become a field, unless
+one of the event or prefix rules above applies. For example,
+`llm.token_count.prompt=12` and `traceloop.entity.name="support-agent"` stay
+custom attributes. They do not supply input tokens or an agent name.
 
 ## Which spelling of each fact we read
 

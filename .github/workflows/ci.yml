@@ -31,7 +31,7 @@ jobs:
       - name: Sync environment
         run: uv sync --python ${{ matrix.python-version }}
       - run: uv run ruff check src tests
-      - run: uv run pyright
+      - run: uv run pyrefly check
       - run: uv run pytest
 
   # The artifacts a customer installs: metadata must render (twine) and the
@@ -74,7 +74,8 @@ jobs:
             "opentelemetry-api==1.25.0" \
             "opentelemetry-sdk==1.25.0" \
             "opentelemetry-exporter-otlp-proto-http==1.25.0" \
-            "opentelemetry-instrumentation==0.46b0"
+            "opentelemetry-instrumentation==0.46b0" \
+            "zstandard==0.22.0"
       - name: Run the suite at the floor
         run: |
           .venv-floor/bin/python -m pytest tests \

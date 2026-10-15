@@ -16,25 +16,13 @@ import weakref
 from collections.abc import Mapping
 
 from opentelemetry import trace
-from opentelemetry.context import (
-    _SUPPRESS_INSTRUMENTATION_KEY,
-    Context,
-    attach,
-    detach,
-    set_value,
-)
+from opentelemetry.context import Context, attach, detach
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor, TracerProvider
 
-from . import _config, _core, _processors, _transport
+from . import _artifacts, _config, _core, _processors, _transport
 from ._semantic import SemanticSpanProcessor
 
 logger = logging.getLogger("convergent.sdk")
-
-#: The suppression key that predates the per-process one in ``opentelemetry.context``.
-#: ``is_instrumentation_enabled`` reads both, so a request that must record no span
-#: sets both. Written out rather than imported, because it lives in the
-#: instrumentation package and this SDK depends on the API and the SDK only.
-_SUPPRESS_INSTRUMENTATION_KEY_PLAIN = "suppress_instrumentation"
 
 #: Every live processor, so a fork can repair the state its child inherited. Weak
 #: so a processor a test threw away does not stay alive here.
@@ -294,7 +282,9 @@ class ConvergentSpanProcessor(SpanProcessor):
         # The filters sit in front of the exporter, and the exporter itself is
         # handed to _core, for the reason _attach_processors gives: flush() reads
         # a queue that lives on the exporter rather than on a filter wrapping it.
-        self._destinations = _processors.wrap(config.policy, config.agents, (exporter,))
+        self._destinations = _processors.wrap(
+            config.policy, config.agents, (exporter, _artifacts.start(api_key, endpoint))
+        )
         self._config = config
         self._semantic = SemanticSpanProcessor(config.release, deployment)
 
@@ -390,7 +380,7 @@ class ConvergentSpanProcessor(SpanProcessor):
         config = self._config
         if config is None:
             return
-        token = attach(_suppressed())
+        token = attach(_transport.suppressed())
         try:
             deployment, linked = _core._register_deployment(
                 api_key=config.api_key,
@@ -417,15 +407,6 @@ def _fingerprint(release: str) -> dict[str, str]:
     a registered span reaches.
     """
     return {"convergent.deployment.fingerprint": release}
-
-
-def _suppressed() -> Context:
-    """A context that turns OpenTelemetry instrumentation off for one call."""
-    return set_value(
-        _SUPPRESS_INSTRUMENTATION_KEY_PLAIN,
-        True,
-        set_value(_SUPPRESS_INSTRUMENTATION_KEY, True),
-    )
 
 
 def _carries(provider: TracerProvider, processor: SpanProcessor) -> bool:

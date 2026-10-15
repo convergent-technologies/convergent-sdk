@@ -1,70 +1,56 @@
 ---
 title: Instrument with a coding agent
-description: Install two portable skills that add Convergent tracing and inspect one recording.
+description: Instrument your agent with one prompt to Claude Code, Codex, or another coding agent.
 ---
 
-The SDK ships two portable agent skills.
+The SDK includes two skills for coding agents. `convergent-instrument` adds
+tracing to your agent, and `convergent-verify` checks each recording without
+changing code.
 
-`convergent-instrument` adds tracing to one Python agent.
-It runs one representative command.
-It works toward an expected recording.
+## Instrument your agent
 
-`convergent-verify` reads one recording.
-It reports evidence-backed findings.
-It changes no code.
+From the root of your repository, give a coding agent this prompt. Fill in the
+last two lines with the agent(s) you wish to instrument and a representative
+command to run them.
 
-Each skill tells the agent to work from current sources.
-`convergent-instrument` checks the installed SDK and preserves project pins.
-Both skills include their workflow and local reference files. They can read
-public documentation or a matching public SDK checkout for API details.
-Local instrumentation and verification need no Convergent CLI or hosted login.
+```text
+Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
 
-## Install the skills
+convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given the agent file or directory to instrument, as well as the instructions or command that runs the agent for the representative run. Use both skills to instrument and verify your agent. Continue using both skills until the recording has no unresolved instrumentation issue.
 
-Ask your coding agent to install the skills from the GitHub repository
-`convergent-technologies/convergent-sdk`. The prompt on the
-[Get started](index.md) page does this as its first step.
+Agent to instrument: <file or directory>
+Representative run: <command or instructions that run the agent>
+```
 
-The skills install into the repository:
+The coding agent installs the skills into `.claude/skills` (Claude Code) or
+`.agents/skills` (Codex). It then:
 
-- Claude Code reads `.claude/skills`.
-- Codex reads `.agents/skills`.
+1. Maps the agent, model, tool, and subagent calls in your code.
+2. Decides what the recording should look like, and asks you about any content
+   it is unsure whether to record.
+3. Adds the smallest instrumentation that works.
+4. Runs your command and records the result locally.
+5. Checks the recording with `convergent-verify` and fixes any issue it finds.
+6. Repeats until the recording looks as expected.
 
-## Start the agent
+It asks you when it needs credentials or permission. It stops when a problem
+outside instrumentation blocks it.
 
-Give the coding agent the instrument prompt from the [Get started](index.md)
-page. It names the agent to instrument and one representative run, and it
-tells the agent to use both skills until the recording is clean.
+## Check your instrumentation
 
-## Instrument one agent
+After you change your agent, or if you added instrumentation yourself, ask a
+coding agent to check it. The check runs your agent once and reads the trace it
+records. It does not change any code. Fill in the last two lines of the prompt
+with the agent you wish to check and a representative command to run it.
 
-Ask the coding agent to add Convergent tracing to one Python agent.
-Name the agent or source path when the repository contains several agents.
-Name a representative run command when the repository does not make it clear.
+```text
+Install the convergent-verify skill from the github repository convergent-technologies/convergent-sdk.
 
-The skill performs these actions:
+Run the representative command below with CONVERGENT_SPANS_DIR set to a temporary directory. Then use convergent-verify to check the spans.jsonl file it writes. Report what you find. Do not change any code.
 
-1. It maps the reachable agent, model, tool, and subagent calls.
-2. It defines the recording expected from the selected command.
-3. It explains which content will be recorded and resolves missing content decisions.
-4. It adds the smallest supported instrumentation.
-5. It runs the command into a temporary spans directory.
-6. It invokes `convergent-verify` on the recording.
-7. It fixes evidence-backed instrumentation issues.
-8. It repeats until the recording reaches the expected state.
+Agent to check: <file or directory>
+Representative run: <command or instructions that run the agent>
+```
 
-The skill stops when the recording matches expectations or a problem outside
-instrumentation prevents progress. Each rerun follows an evidence-backed change.
-It asks for user action when credentials or permission are required.
-
-## Verify a recording
-
-Invoke `convergent-verify` by itself when a recording already exists.
-Pass the spans path and agent name when known.
-Pass the expected recording when one was defined before the run.
-
-The skill renders one agent subtree.
-It includes nested agents with different names.
-It hides recorded content values by default.
-It reports `issue`, `question`, and `fyi` findings.
-It leaves application code unchanged.
+The coding agent reports each finding as an `issue` (something to fix), a
+`question` (something it needs you to decide), or an `fyi`.
