@@ -1,5 +1,5 @@
 """``input_artifact()`` and ``output_artifact()`` against a local fake of
-``HEAD`` and ``PUT /v1/artifacts/{digest}`` (CON-7077, CON-7079).
+``HEAD`` and ``PUT /v1/artifacts/{digest}``.
 
 The fake checks what the real route checks: the digest in the path must be
 ``sha256:`` and the SHA-256 of the decompressed body, or it answers 400. ``HEAD``
@@ -48,8 +48,13 @@ class _Route:
     puts: list[_Put] = field(default_factory=list)
     held: dict[str, int] = field(default_factory=dict)
     batches: list[bytes] = field(default_factory=list)
-    answers: list[tuple[int, dict[str, str]]] = field(default_factory=list)
+    # Status, headers, and an optional body for the next PUTs.
+    answers: list[tuple[int, dict[str, str]] | tuple[int, dict[str, str], bytes]] = field(
+        default_factory=list
+    )
     gate: threading.Event = field(default_factory=threading.Event)
+    #: File uploads are off: HEAD and PUT answer 403 with the off reason.
+    off: bool = False
 
     def __post_init__(self) -> None:
         self.gate.set()
@@ -90,17 +95,25 @@ def route(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Route]:
                 body = zstandard.decompress(body)
             digest = self.path.removeprefix("/v1/artifacts/")
             state.puts.append(_Put(digest, dict(self.headers), body))
-            status, headers = state.answers.pop(0) if state.answers else (201, {})
+            status, headers, *rest = state.answers.pop(0) if state.answers else (201, {})
+            answer = rest[0] if rest else b""
             if _sha(body) != digest:
-                status, headers = 400, {}
+                status, headers, answer = 400, {}, b""
             if 200 <= status < 300:
                 state.held[digest] = len(body)
             self.send_response(status)
             for name, value in headers.items():
                 self.send_header(name, value)
+            self.send_header("Content-Length", str(len(answer)))
             self.end_headers()
+            self.wfile.write(answer)
 
         def do_HEAD(self) -> None:
+            if state.off:
+                self.send_response(403)
+                self.send_header("X-Convergent-Reason", "artifact_uploads_disabled")
+                self.end_headers()
+                return
             size = state.held.get(self.path.removeprefix("/v1/artifacts/"))
             self.send_response(404 if size is None else 200)
             if size is not None:
@@ -334,24 +347,52 @@ def test_a_503_is_retried_after_retry_after(route: _Route) -> None:
     assert (result.ok, result.dropped_uploads) == (True, 0)
 
 
-def test_a_404_stops_uploading_and_listing_for_the_process(route: _Route) -> None:
+def test_uploads_pause_while_the_route_says_they_are_off_then_resume(
+    route: _Route, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_artifacts, "_PAUSE_S", 0.5)
     _init(route)
-    route.answers.append((404, {}))
+    route.off = True
 
-    with convergent.span(name="before", operation="tool_call") as before:
-        before.input_artifact(b"first file")
+    # The off answer comes on the HEAD, so no file bytes are sent at all.
+    with convergent.span(name="refused", operation="tool_call") as refused:
+        refused.input_artifact(b"first file")
+    off = convergent.flush(uploads=True)
+    with convergent.span(name="paused", operation="tool_call") as paused:
+        paused.input_artifact(b"second file")
     convergent.flush(uploads=True)
-    with convergent.span(name="after", operation="tool_call") as after:
-        after.input_artifact(b"second file")
-    convergent.flush(uploads=True)
+    route.off = False
+    time.sleep(0.6)
+    with convergent.span(name="resumed", operation="tool_call") as resumed:
+        resumed.input_artifact(b"third file")
+    result = convergent.flush(uploads=True)
 
-    assert [put.digest for put in route.puts] == [_sha(b"first file")]
+    assert [put.digest for put in route.puts] == [_sha(b"third file")]
     spans = route.spans()
-    assert "convergent.artifacts.input" in spans["execute_tool before"]
-    assert "convergent.artifacts.input" not in spans["execute_tool after"]
-    for thread in _upload_threads():
-        thread.join(timeout=2)
-    assert not any(thread.is_alive() for thread in _upload_threads())
+    assert "convergent.artifacts.input" not in spans["execute_tool paused"]
+    assert "convergent.artifacts.input" in spans["execute_tool resumed"]
+    # Uploads being off is not a failure the caller can act on.
+    assert (off.ok, off.dropped_uploads) == (True, 0)
+    assert (result.ok, result.dropped_uploads) == (True, 0)
+
+
+def test_a_bare_404_or_409_drops_only_that_file_and_flush_reports_it(route: _Route) -> None:
+    _init(route)
+    route.answers += [(404, {}), (409, {})]
+
+    with convergent.span(name="tool", operation="tool_call") as tool:
+        tool.input_artifact(b"behind a proxy")
+        tool.output_artifact(b"raced")
+    failed = convergent.flush(uploads=True)
+    with convergent.span(name="later", operation="tool_call") as later:
+        later.input_artifact(b"still listed")
+    later_result = convergent.flush(uploads=True)
+
+    assert (failed.ok, failed.dropped_uploads) == (False, 2)
+    assert route.puts[-1].digest == _sha(b"still listed")
+    assert "convergent.artifacts.input" in route.spans()["execute_tool later"]
+    assert later_result.ok
+    assert route.puts[0].headers["User-Agent"].startswith("convergent-sdk-python/")
 
 
 def test_a_closed_queue_copies_no_files_and_flush_does_not_wait(route: _Route) -> None:

@@ -19,7 +19,12 @@ section may describe a version whose tag does not exist yet.
   [the API reference](docs/reference/api.md#spanhandle).
 - `flush()` takes `uploads=True` to wait for those uploads, up to
   `upload_timeout_ms`. `FlushResult` reports `pending_uploads` and
-  `dropped_uploads`.
+  `dropped_uploads`, and with `uploads=True`, `ok` is false while any file is
+  still pending or was dropped.
+- When the upload route says file uploads are off for your organization, the
+  SDK pauses them for 10 minutes and asks again, so turning them on needs no
+  restart. A bare 404 drops only that file. Uploads send
+  `User-Agent: convergent-sdk-python/<version>`.
 
 ## 0.0.9
 

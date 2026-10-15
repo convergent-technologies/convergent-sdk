@@ -336,7 +336,7 @@ def test_the_printed_report_reads_like_the_readme() -> None:
     report = Report(
         status=Status(
             enabled=True,
-            deployment="dep_4f11938ad78945df",
+            deployment="dep_abc",
             release=_RELEASE,
             destinations=["convergent", "file:/data/spans.jsonl"],
             mode="attached",

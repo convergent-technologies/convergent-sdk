@@ -108,7 +108,8 @@ class FlushResult:
     #: Files from ``input_artifact()`` and ``output_artifact()`` not yet uploaded.
     pending_uploads: int = 0
     #: Files not uploaded since the last ``flush()``: over the queue bound,
-    #: refused by the route, or out of retries.
+    #: refused by the route, or out of retries. With ``uploads=True``, any file
+    #: still pending or dropped turns ``ok`` off.
     dropped_uploads: int = 0
 
     def __bool__(self) -> bool:
@@ -789,7 +790,8 @@ def flush(
             uploader.wait(max(upload_timeout_ms, 0) / 1_000)
         pending_uploads = uploader.pending()
         dropped_uploads = uploader.take_dropped()
-        ok = ok and not (uploads and pending_uploads)
+        # Waiting for uploads asks whether every file landed, so a dropped one counts.
+        ok = ok and not (uploads and (pending_uploads or dropped_uploads))
     elapsed_ms = int((_monotonic() - started) * 1_000)
     # Only when the flush actually failed *and* something is still queued. Spans
     # left behind by a successful flush are a busy process, not a problem.
