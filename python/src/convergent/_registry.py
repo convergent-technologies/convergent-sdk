@@ -26,7 +26,7 @@ from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["RegistrationError", "get_json", "post_json"]
+__all__ = ["RegistrationError", "backoff_delay", "get_json", "post_json"]
 
 MAX_RESPONSE_BYTES = 1 * 1024 * 1024
 
@@ -122,12 +122,19 @@ def post_json(
 
         if attempt == max_attempts - 1:
             break
-        delay = min(base_backoff * 2**attempt, max_backoff) * rng()  # full jitter
+        delay = backoff_delay(attempt, base=base_backoff, cap=max_backoff, rng=rng)
         if monotonic() + delay > deadline_at:
             break
         sleep(delay)
 
     raise RegistrationError(reason)
+
+
+def backoff_delay(
+    attempt: int, *, base: float, cap: float, rng: Callable[[], float] = random.random
+) -> float:
+    """Full jitter: a random wait up to ``base * 2**attempt`` seconds, capped at ``cap``."""
+    return min(base * 2**attempt, cap) * rng()
 
 
 def get_json(url: str, *, headers: dict[str, str], timeout: float = 5.0) -> dict[str, object]:

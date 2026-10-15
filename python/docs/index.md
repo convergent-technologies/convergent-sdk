@@ -1,6 +1,6 @@
 ---
-title: Get started
-description: Install the SDK, set your key, and instrument your agent with the coding-agent skills.
+title: Python SDK
+description: Install the SDK, set your key, and trace your first agent run.
 ---
 
 ## Install
@@ -9,7 +9,7 @@ description: Install the SDK, set your key, and instrument your agent with the c
 pip install convergent-sdk
 ```
 
-[Stability](stability.md) states the version policy.
+[Versioning](stability.md) states the version policy.
 
 ## Set your key
 
@@ -24,23 +24,21 @@ export CONVERGENT_API_KEY="cvk_xxxxxxxxxxxxxxxx"
 export GIT_SHA=$(git rev-parse --short HEAD)
 ```
 
-Both are environment variables, and they must be set in the environment that
-runs your agent. The export works for local development. In a deployment, put
-them where you store your other secrets or environment variables.
+Set both in the environment that runs your agent. In a deployment, store them
+with your other secrets.
 
-`init()` needs `CONVERGENT_API_KEY`, or a `File()` destination when you record
-locally instead. `GIT_SHA` is an example environment variable name you can use
-to describe a release with `init(release=...)`. Describing a release is
-optional.
+`init()` needs `CONVERGENT_API_KEY`, or a `File()` destination to record
+locally. `GIT_SHA` is only an example name. Use it to pass a release to
+`init(release=...)`.
 
 ## Instrument with a coding agent
 
-Two portable skills do the work: `convergent-instrument` adds tracing, and
-`convergent-verify` inspects the recording. Your coding agent installs both from
-the SDK repository. This works with Claude Code and Codex.
+Two skills do the work. `convergent-instrument` adds tracing, and
+`convergent-verify` checks the recording. Your coding agent installs both from
+the SDK repository. They work with Claude Code and Codex.
 
 From the root of your repository, give your coding agent this prompt. Fill in
-the agent to instrument and one representative run:
+the last two lines:
 
 ```text
 Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
@@ -51,12 +49,10 @@ Agent to instrument: <file or directory>
 Representative run: <command or instructions that run the agent>
 ```
 
-The agent instruments your code, runs the command, and inspects the recording.
-It repeats until the recording has no unresolved instrumentation issue.
+The agent instruments your code, runs the command, and checks the recording.
+It repeats until the recording has no open issue.
 
-To check an existing setup, ask the agent to use `convergent-verify` on a
-recording. It reports findings and changes no code. This prompt starts that
-check directly:
+To check an agent that is already instrumented, use this prompt instead:
 
 ```text
 Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
@@ -71,12 +67,12 @@ Representative run: <command or instructions that run the agent>
 
 ## Example: Trace a run
 
-Call `init()` once at startup, and put `agent()` on the function that handles one request.
-The model call inside it is the one your app already makes, and this one is the OpenAI
-client. Save it as `app.py`.
+Call `init()` once at startup. Put `agent()` on the function that handles one
+request. Inside it, keep the model call your app already makes. This example
+uses the OpenAI client. Save it as `app.py`.
 
-`release` names the deployed version, so recordings group by release. Pass any
-string, or set `CONVERGENT_RELEASE` and drop the argument.
+`release` names the deployed version, so Convergent groups recordings by
+release. Pass any string, or set `CONVERGENT_RELEASE` and leave out the argument.
 
 ```python
 import os
@@ -111,7 +107,7 @@ print(answer("Where is my invoice?"))
 convergent.flush()
 ```
 
-From your command line, run:
+Run it:
 
 ```bash
 pip install openai
@@ -120,22 +116,21 @@ export GIT_SHA=$(git rev-parse --short HEAD)
 python app.py
 ```
 
-That records one agent run with one model call inside it, carrying the prompt, the answer,
-the model, and the token counts. Any other model client goes in the same place, and the
-trace keeps the same shape.
+This records one agent run with one model call inside it. The model call holds
+the prompt, the answer, the model, and the token counts. Another model client
+goes in the same place and gives the same trace shape.
 
-## The rest of this documentation
+## Next steps
 
 - [Instrument with a coding agent](agent-skill.md): what the skills do.
-- [Already using OpenTelemetry](opentelemetry.md): attach to an existing OpenTelemetry setup and filter spans.
+- [OpenTelemetry](opentelemetry.md): attach to an existing OpenTelemetry setup and filter spans.
 - [Integrations](integrations/index.md): the integration packages.
-- [Instrument](instrument.md): confirm a run arrived with `check()`, and instrument by hand.
 - [Configuration](configuration.md): every argument and environment variable.
 - [API reference](reference/api.md): every public function.
-- [Attribute support](reference/attributes.md): the attribute spellings Convergent reads.
+- [Attributes](reference/attributes.md): the attribute spellings Convergent reads.
 - [Troubleshooting](troubleshooting.md): what to do when a run does not arrive.
 
 The [SDK repository](https://github.com/convergent-technologies/convergent-sdk)
-holds the source and runnable examples: the run above as a self-contained file
-that needs no OpenAI key, and one trace recorded across a dispatcher and three
+has the source and runnable examples. One is the run above as a single file that
+needs no OpenAI key. Another records one trace across a dispatcher and three
 worker processes.

@@ -9,7 +9,7 @@ Convergent workspace.
 pip install convergent-sdk
 ```
 
-For the APIs in these docs, use `convergent-sdk>=0.0.9,<0.1`.
+For the APIs in these docs, use `convergent-sdk>=0.0.10,<0.1`.
 While the SDK is on 0.x, a minor release may change the public API, and the
 upper bound keeps such a release out of a routine dependency update.
 [Stability](docs/stability.md) states the full policy.

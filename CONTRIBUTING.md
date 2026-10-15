@@ -19,4 +19,4 @@ To work on the Python package locally:
     uv sync
     uv run pytest
     uv run ruff check src tests
-    uv run pyright
+    uv run pyrefly check

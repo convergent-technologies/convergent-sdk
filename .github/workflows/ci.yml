@@ -31,7 +31,7 @@ jobs:
       - name: Sync environment
         run: uv sync --python ${{ matrix.python-version }}
       - run: uv run ruff check src tests
-      - run: uv run pyright
+      - run: uv run pyrefly check
       - run: uv run pytest
 
   # The artifacts a customer installs: metadata must render (twine) and the

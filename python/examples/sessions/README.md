@@ -18,5 +18,5 @@ Each run has a tool span and an OpenTelemetry child span. Two runs carry
 `convergent.session.id=chat-1` and two carry `convergent.session.id=chat-2`.
 The file has one additional span, `after sessions`, with no session ID.
 
-See [session grouping](../../docs/instrument.md#link-the-turns-of-a-conversation)
+See [session grouping](../../docs/reference/api.md#session)
 for nested sessions, async tasks, and propagation between services.

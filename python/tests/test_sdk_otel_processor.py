@@ -11,8 +11,9 @@ from typing import Any, NamedTuple
 
 import pytest
 from opentelemetry import trace
+from opentelemetry.context import Context
 from opentelemetry.instrumentation.utils import is_instrumentation_enabled
-from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -774,7 +775,7 @@ def test__carries_finds_processor_inside_a_composite(
         def __init__(self, wrapped: SpanProcessor) -> None:
             self._span_processors = (wrapped,)
 
-        def on_start(self, span: ReadableSpan, parent_context: Any) -> None:
+        def on_start(self, span: Span, parent_context: Context | None = None) -> None:
             pass
 
         def on_end(self, span: ReadableSpan) -> None:

@@ -16,7 +16,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, SpanProcessor, TracerProvider
 
-from . import _policy, _processors, _registry, _semantic, _transport
+from . import _artifacts, _policy, _processors, _registry, _semantic, _transport
 from ._config import (
     _FLAG_ON,
     _clean,
@@ -105,6 +105,11 @@ class FlushResult:
     #: batches the receiver refused or the export never delivered.
     dropped: int
     elapsed_ms: int
+    #: Files from ``input_artifact()`` and ``output_artifact()`` not yet uploaded.
+    pending_uploads: int = 0
+    #: Files not uploaded since the last ``flush()``: over the queue bound,
+    #: refused by the route, or out of retries.
+    dropped_uploads: int = 0
 
     def __bool__(self) -> bool:
         return self.ok
@@ -695,24 +700,28 @@ def _attach_processors(
     silently -- the failure mode this whole feature exists to avoid.
     """
     exporters: list[SpanProcessor] = list(built)
+    uploads: list[SpanProcessor] = []
     if config.api_key and config.endpoint:
         try:
             exporters.append(
                 _transport.build_processor(api_key=config.api_key, endpoint=config.endpoint)
             )
+            uploads.append(_artifacts.start(config.api_key, config.endpoint))
         except Exception:
             _warn_once("otlp_exporter", "Convergent could not start its network exporter")
     if not exporters:
         return []
 
     semantic = SemanticSpanProcessor(config.release, deployment)
-    wrapped = _processors.wrap(config.policy, config.agents, exporters)
+    wrapped = _processors.wrap(config.policy, config.agents, [*exporters, *uploads])
     for processor in [semantic, _processors._STAMPER, *wrapped]:
         provider.add_span_processor(processor)
     return [semantic, *exporters]
 
 
-def flush(timeout_ms: int = 5_000) -> FlushResult:
+def flush(
+    timeout_ms: int = 5_000, *, uploads: bool = False, upload_timeout_ms: int = 60_000
+) -> FlushResult:
     """Drain buffered spans now. Never raises.
 
     Call this in any process that might be killed rather than exit normally --
@@ -740,6 +749,11 @@ def flush(timeout_ms: int = 5_000) -> FlushResult:
     The loss count is taken and reset once per process, so two callers flushing at
     the same time split the signal: exactly one of them sees a given loss, in its
     ``ok`` and in its ``dropped``.
+
+    File uploads drain on their own thread and are not waited for unless
+    ``uploads`` is true. Then the call waits up to ``upload_timeout_ms`` after the
+    span drain, because the span budget is too short for large files, and ``ok``
+    also requires that no upload is left pending.
     """
     started = _monotonic()
     with _lock:
@@ -767,6 +781,15 @@ def flush(timeout_ms: int = 5_000) -> FlushResult:
     lost = _transport.lost_spans()
     ok = ok and lost == 0
     dropped = _transport.dropped_spans() + lost
+
+    uploader = _artifacts.current()
+    pending_uploads = dropped_uploads = 0
+    if uploader is not None:
+        if uploads:
+            uploader.wait(max(upload_timeout_ms, 0) / 1_000)
+        pending_uploads = uploader.pending()
+        dropped_uploads = uploader.take_dropped()
+        ok = ok and not (uploads and pending_uploads)
     elapsed_ms = int((_monotonic() - started) * 1_000)
     # Only when the flush actually failed *and* something is still queued. Spans
     # left behind by a successful flush are a busy process, not a problem.
@@ -777,7 +800,14 @@ def flush(timeout_ms: int = 5_000) -> FlushResult:
             elapsed_ms,
             pending,
         )
-    return FlushResult(ok=ok, pending=pending, dropped=dropped, elapsed_ms=elapsed_ms)
+    return FlushResult(
+        ok=ok,
+        pending=pending,
+        dropped=dropped,
+        elapsed_ms=elapsed_ms,
+        pending_uploads=pending_uploads,
+        dropped_uploads=dropped_uploads,
+    )
 
 
 def snapshot() -> Snapshot:
@@ -1165,8 +1195,8 @@ def _span_limits() -> SpanLimits:
 
     The limit that actually exists is on the request, not on one value, and it is
     enforced where requests are made: compression and the receiver's own body
-    limit. Content too large to keep on a span is moved to the blob store at
-    ingest and replaced by a reference.
+    limit. A file belongs in ``input_artifact()`` or ``output_artifact()``, which
+    upload it apart from the span.
 
     ``OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`` still works for a caller who wants a
     cap, because ``SpanLimits()`` reads it.
@@ -1178,6 +1208,7 @@ def _reset_for_tests() -> None:
     global _config, _dropped, _provider_source, _startup_failure, _state, _registration_triggers
     with _lock:
         _shut_down(_drain)
+        _artifacts._reset_for_tests()
         _transport.dropped_spans()
         _transport.lost_spans()
         _state = Snapshot()

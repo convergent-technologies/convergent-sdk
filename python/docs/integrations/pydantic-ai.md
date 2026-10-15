@@ -1,11 +1,11 @@
 ---
-title: pydantic-ai
-description: Trace every pydantic-ai agent run, model call, and tool call.
+title: Pydantic AI
+description: Trace every Pydantic AI agent run, model call, and tool call.
 ---
 
-pydantic-ai emits OpenTelemetry spans itself, so there is no instrumentation
-package to install. Point its instrumentation at the tracer provider `init()`
-configured and each `run()` becomes an agent run in your workspace.
+Pydantic AI records its own spans, so you install no instrumentation package.
+Point it at the tracer provider that `init()` set up. Each `run()` then becomes
+an agent run in Convergent.
 
 ## Install
 
@@ -13,8 +13,7 @@ configured and each `run()` becomes an agent run in your workspace.
 pip install "pydantic-ai>=1.107,<2"
 ```
 
-The bound matters: pydantic-ai 2.x renames the run span's token keys to
-`gen_ai.aggregated_usage.*`, and this page describes the 1.x line.
+Keep the `<2` bound. Pydantic AI 2.x changes its token attributes.
 
 ## Enable
 
@@ -43,36 +42,9 @@ agent = Agent(
 print(agent.run_sync("Is my invoice paid?").output)
 ```
 
-pydantic-ai puts prompts and completions in the trace by default.
-`InstrumentationSettings(version=...)` selects the span format pydantic-ai
-emits; the default works with Convergent.
-
-Name every agent. `Agent(name=...)` becomes `gen_ai.agent.name`, which is how the
-workspace tells agents apart. Give it a name that holds still across runs: a name
-carrying a user id, an experiment arm, or a run id turns one agent into many in
-the workspace, and the place to fix it is the `name=` argument itself.
-
-Use one `Instrumentation` capability per agent. Each one records its own copy of
-every span, so a second doubles the whole trace. When the agent already has other
-capabilities, add to the list rather than replacing it.
-
-pydantic-ai opens the agent run itself, so do not also wrap the same `run()` or
-`run_sync()` call in `agent()` under the same name. The run would arrive twice.
-Reserve an outer `agent()` for a coordinator of your own, under a name of its
-own. Leave `init(agents=...)` out for the same reason: pydantic-ai names the
-agent itself.
-
-pydantic-ai writes its own `gen_ai.conversation.id` onto the spans it opens:
-the `conversation_id=` you pass to `run()`, else the most recent id in
-`message_history`, else a fresh id for the run. Pass `conversation_id=` to
-`run()` to group a conversation's turns under your own id.
-
-## What lands in the trace
-
-- one `invoke_agent` span per run, carrying `gen_ai.agent.name` from
-  `Agent(name=...)` and the run's aggregated token counts under `gen_ai.usage.*`
-- one span per model call, named `chat` followed by the model, carrying
-  `gen_ai.request.model`, `gen_ai.response.model`, `gen_ai.provider.name`, and
-  both token counts
-- `gen_ai.input.messages` and `gen_ai.output.messages` on the model call
-- one span per tool call the agent makes
+- **Name every agent.** Use a name that stays the same across runs.
+- **Add one `Instrumentation` capability per agent.** A second one records
+  every span twice.
+- **Do not wrap `run()` in `agent()`.** Pydantic AI opens the agent run itself.
+- **Pass `conversation_id=` to `run()`** to group a conversation's turns under
+  your own ID.

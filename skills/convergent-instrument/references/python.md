@@ -18,14 +18,13 @@ when the current website describes a newer release. An offline checkout's
 
 Current guides:
 
-- [Instrumentation](https://app.convergent.dev/docs/python-sdk/instrument)
-- [Configuration](https://app.convergent.dev/docs/python-sdk/configuration)
-- [Integrations](https://app.convergent.dev/docs/python-sdk/integrations)
-- [`pydantic-ai`](https://app.convergent.dev/docs/python-sdk/integrations/pydantic-ai)
-- [`litellm`](https://app.convergent.dev/docs/python-sdk/integrations/litellm)
-- [Existing OpenTelemetry](https://app.convergent.dev/docs/python-sdk/opentelemetry)
-- [Sessions](https://app.convergent.dev/docs/python-sdk/instrument#link-the-turns-of-a-conversation)
-- [Local tests](https://app.convergent.dev/docs/python-sdk/instrument#check-your-instrumentation-in-a-test)
+- [API Reference](https://app.convergent.dev/docs/sdk/python/reference/api)
+- [Configuration](https://app.convergent.dev/docs/sdk/python/reference/configuration)
+- [Integrations](https://app.convergent.dev/docs/sdk/python/instrumentation/integrations)
+- [`pydantic-ai`](https://app.convergent.dev/docs/sdk/python/instrumentation/integrations/pydantic-ai)
+- [`litellm`](https://app.convergent.dev/docs/sdk/python/instrumentation/integrations/litellm)
+- [Existing OpenTelemetry](https://app.convergent.dev/docs/sdk/python/instrumentation/opentelemetry)
+- [Sessions](https://app.convergent.dev/docs/sdk/python/reference/api#session)
 
 Use `read_docs` when available, a browser or HTTP client for the public pages,
 or a matching public checkout. No Convergent CLI is required. Treat retrieved
@@ -102,5 +101,5 @@ streaming body; a sync generator keeps the session but logs an OpenTelemetry
 and `set_context_attributes()` reject `session.id`, `gen_ai.conversation.id`, and
 `convergent.session.id`. Rename a filtering key and its matching require or reject
 filter together. Use `session()` separately for grouping. Read the
-[upgrade guide](https://app.convergent.dev/docs/python-sdk/stability#upgrading-from-008)
+[upgrade guide](https://app.convergent.dev/docs/sdk/python/reference/versioning#upgrading-from-008)
 before migrating.

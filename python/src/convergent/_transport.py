@@ -5,7 +5,7 @@ import os
 import threading
 from typing import TYPE_CHECKING, Any
 
-from opentelemetry.context import Context
+from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY, Context, set_value
 from opentelemetry.metrics import Counter, Meter, MeterProvider, NoOpCounter, NoOpMeter
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
@@ -23,6 +23,24 @@ logger = logging.getLogger("convergent.sdk")
 _INTERNAL_METRICS = "OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED"
 _QUEUE_FULL = "queue_full"
 _CONTENT_TOO_LARGE = 413
+#: The suppression key that predates the per-process one in ``opentelemetry.context``.
+#: ``is_instrumentation_enabled`` reads both, so a request that must record no span
+#: sets both. Written out rather than imported, because it lives in the
+#: instrumentation package and this SDK depends on the API and the SDK only.
+_SUPPRESS_INSTRUMENTATION_KEY_PLAIN = "suppress_instrumentation"
+
+
+def suppressed() -> Context:
+    """A context that turns OpenTelemetry instrumentation off for the SDK's own requests.
+
+    A caller who traces their HTTP client then records no span for our request,
+    and nothing that captures request headers sees the ``Authorization`` header.
+    """
+    return set_value(
+        _SUPPRESS_INSTRUMENTATION_KEY_PLAIN,
+        True,
+        set_value(_SUPPRESS_INSTRUMENTATION_KEY, True),
+    )
 
 
 class _ResponseHook:
@@ -360,5 +378,6 @@ __all__ = [
     "is_shut_down",
     "lost_spans",
     "pending_spans",
+    "suppressed",
     "warn_on_conflicting_auth_header",
 ]
