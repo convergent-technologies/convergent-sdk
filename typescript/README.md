@@ -145,14 +145,16 @@ characters of the file's SHA-256 hash.
 
 The upload runs in the background after the span ends. The SDK sends the copy
 to `<endpoint>/v1/artifacts/<digest>`, zstd-compressed unless it is already a
-compressed image or archive, with the filename so the server
-can identify the file's type. It first asks whether your
-workspace already holds the file, and sends no bytes when it does. A file the
-server stored or refused (409, 413, or 422) is not sent again by this process.
-A file whose upload ran out of retries or hit an error is sent again when a
-later span lists it. If the upload route answers 404, file uploads are off for
-your organization. The SDK then stops uploading and listing files for the rest
-of the process, and does the same after a 401.
+compressed image or archive, with the filename so the server can identify the
+file's type. It first asks whether your workspace already holds the file, and
+sends no bytes when it does. A file the server stored or refused (413 or 422) is
+not sent again by this process. A file whose upload ran out of retries or hit an
+error, a bare 404 included, is sent again when a later span lists it. If the
+upload route says file uploads are off for your organization (a 403 whose
+`details.reason`, or `X-Convergent-Reason` header, is
+`artifact_uploads_disabled`), the SDK pauses uploading and listing files for 10
+minutes, then asks again. A 401 stops them for the rest of the process. Uploads
+send `User-Agent: convergent-sdk-typescript/<version>`.
 
 A span lists at most 100 files, and spans that have not ended hold at most
 128 MiB of copies across the process. A file past either limit, one larger

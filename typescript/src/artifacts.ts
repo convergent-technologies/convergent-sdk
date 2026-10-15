@@ -26,7 +26,7 @@ type Role = "input" | "output";
 
 // "refused" is a final answer about the bytes, so they are never sent again.
 // "fail" drops it this time only, and a later span can send it again.
-type Step = "stored" | "refused" | "retry" | "stop" | "fail";
+type Step = "stored" | "refused" | "retry" | "pause" | "stop" | "fail";
 
 interface Capture {
   role: Role;
@@ -42,17 +42,28 @@ interface Capture {
 interface Answer {
   status: number;
   headers: IncomingHttpHeaders;
+  body: string;
 }
+
+declare const __CONVERGENT_SDK_VERSION__: string;
 
 const listKeys: Record<Role, string> = {
   input: "convergent.artifacts.input",
   output: "convergent.artifacts.output",
 };
 const droppedKey = "convergent.artifacts.dropped";
-// 404 means uploads are off for the organization and 401 a bad key; either ends
-// uploads and file lists for the rest of the process.
-const stopStatus = new Set([401, 404]);
-const refusedStatus = new Set([409, 413, 422]);
+// The route says uploads are off for the organization with this error reason, and
+// only with it, so a 403 or 404 from a proxy or load balancer cannot turn uploads
+// off. Uploads and file lists pause for pauseMs, then the next file asks again.
+const uploadsOffReason = "artifact_uploads_disabled";
+// Carries the reason on answers that have no body, such as a HEAD.
+const reasonHeader = "x-convergent-reason";
+const pauseMs = 10 * 60_000;
+// A bad key ends uploads and file lists for the rest of the process.
+const stopStatus = new Set([401]);
+const refusedStatus = new Set([413, 422]);
+const errorBodyBytes = 4096;
+const userAgent = `convergent-sdk-typescript/${typeof __CONVERGENT_SDK_VERSION__ === "string" ? __CONVERGENT_SDK_VERSION__ : "0.0.0"}`;
 const retryableStatus = new Set([429, 500, 502, 503, 504]);
 const MiB = 1024 * 1024;
 // Files are packed into one attribute per role, so a span's count is capped.
@@ -79,6 +90,8 @@ const compressedSignature =
 
 export class Artifacts {
   private state: "open" | "stopped" | "closed" = "open";
+  // Until this performance.now() reading, the route said uploads are off.
+  private pausedUntil = 0;
   private readonly held = new Map<string, { captures: Capture[]; dropped: number }>();
   private heldBytes = 0;
   private readonly queue: Capture[] = [];
@@ -94,7 +107,7 @@ export class Artifacts {
 
   attach(span: Span, role: Role, source: unknown, options: ArtifactOptions): void {
     try {
-      if (this.state !== "open" || !span.isRecording()) return;
+      if (!this.accepting() || !span.isRecording()) return;
       const { traceId, spanId } = span.spanContext();
       let held = this.held.get(spanId);
       if (!held) {
@@ -159,7 +172,7 @@ export class Artifacts {
         this.answered.add(digest);
         continue;
       }
-      if (this.pending.has(digest) || this.state !== "open") continue;
+      if (this.pending.has(digest) || !this.accepting()) continue;
       if (this.queuedBytes + capture.sizeBytes > queuedBytesLimit) {
         reportOnce(
           "artifact_queue_full",
@@ -195,6 +208,7 @@ export class Artifacts {
         this.queuedBytes -= capture.sizeBytes;
         if (step === "stored" || step === "refused") this.remember(capture.digest);
         if (step === "stop") this.stop();
+        else if (step === "pause") this.pause();
       }
     } finally {
       this.draining = undefined;
@@ -206,10 +220,15 @@ export class Artifacts {
     const authorization = `Bearer ${this.options.apiKey}`;
     // Only a 200 carrying the file's size counts, so a proxy that answers 200
     // to everything cannot make uploads stop.
-    const held = await send(url, "HEAD", { Authorization: authorization }).catch(() => undefined);
+    const held = await send(url, "HEAD", {
+      Authorization: authorization,
+      "User-Agent": userAgent,
+    }).catch(() => undefined);
     if (held?.status === 200 && held.headers["content-length"] === String(capture.sizeBytes)) {
       return "stored";
     }
+    // The off answer comes before any bytes are sent.
+    if (held?.headers[reasonHeader] === uploadsOffReason) return "pause";
     const isCompressed = compressedSignature.test(capture.body.subarray(0, 12).toString("latin1"));
     // The receiver sizes its memory hold from the size the frame declares.
     const body = isCompressed
@@ -217,6 +236,7 @@ export class Artifacts {
       : await compress(capture.body, { pledgedSrcSize: capture.body.length });
     const headers: OutgoingHttpHeaders = {
       Authorization: authorization,
+      "User-Agent": userAgent,
       "Content-Type": capture.mediaType,
       "Content-Length": body.length,
       "X-Convergent-Trace-Id": capture.traceId,
@@ -226,7 +246,10 @@ export class Artifacts {
     let step: Step = "retry";
     for (let attempt = 0; attempt < attempts; attempt++) {
       const answer = await send(url, "PUT", headers, body).catch(() => undefined);
-      step = answer ? stepFor(answer.status) : "retry";
+      const reason = answer?.headers[reasonHeader];
+      step = answer
+        ? stepFor(answer.status, typeof reason === "string" ? reason : errorReason(answer.body))
+        : "retry";
       if (step !== "retry" || attempt === attempts - 1) break;
       const retryAfter = seconds(answer?.headers["retry-after"]);
       await this.sleep(
@@ -253,13 +276,26 @@ export class Artifacts {
     }
   }
 
+  private accepting(): boolean {
+    return this.state === "open" && performance.now() >= this.pausedUntil;
+  }
+
   private stop(): void {
     if (this.state !== "open") return;
     this.state = "stopped";
     this.discard();
     reportOnce(
       "artifact_uploads_stopped",
-      "Convergent stopped uploading files for this process: the upload route answered 404 or 401. A 404 means file uploads are off for this organization. Spans keep exporting and list no more files.",
+      "Convergent stopped uploading files for this process: the upload route refused the API key. Spans keep exporting and list no more files.",
+    );
+  }
+
+  private pause(): void {
+    this.pausedUntil = performance.now() + pauseMs;
+    this.discard();
+    reportOnce(
+      "artifact_uploads_paused",
+      "Convergent paused file uploads: the upload route says they are off. Spans keep exporting and list no files until it asks again in 10 minutes.",
     );
   }
 
@@ -396,8 +432,18 @@ function contentDisposition(filename: string): string {
   return `attachment; filename*=UTF-8''${encoded}`;
 }
 
-function stepFor(status: number): Step {
+function errorReason(body: string): string | undefined {
+  try {
+    const reason: unknown = JSON.parse(body)?.details?.reason;
+    return typeof reason === "string" ? reason : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function stepFor(status: number, reason?: string): Step {
   if (status >= 200 && status < 300) return "stored";
+  if (reason === uploadsOffReason) return "pause";
   if (stopStatus.has(status)) return "stop";
   if (refusedStatus.has(status)) return "refused";
   return retryableStatus.has(status) ? "retry" : "fail";
@@ -421,12 +467,16 @@ function send(
       url,
       { method, headers, timeout: requestTimeoutMs },
       (response) => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          if (body.length < errorBodyBytes) body += chunk;
+        });
         response.on("end", () =>
-          resolve({ status: response.statusCode ?? 0, headers: response.headers }),
+          resolve({ status: response.statusCode ?? 0, headers: response.headers, body }),
         );
         response.on("close", () => reject(new Error("Convergent upload response closed early.")));
         response.on("error", reject);
-        response.resume();
       },
     );
     request.on("socket", (socket) => socket.unref());

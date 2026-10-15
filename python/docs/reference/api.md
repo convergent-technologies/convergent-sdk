@@ -607,7 +607,7 @@ Only the upload runs in the background. After the span ends and passes the
 - It first asks the server whether your workspace already holds the file. If
   so, it sends no bytes, so a fresh process does not resend files an earlier
   run uploaded.
-- A file already stored, or one the server refused (409, 413, or 422), is not
+- A file already stored, or one the server refused (413 or 422), is not
   sent again.
 - A file whose upload ran out of retries or hit an error is sent again when a
   later span lists it.
@@ -624,8 +624,13 @@ Limits:
   listing; the file is still recorded.
 - Files are recorded only on spans the SDK opened, and only when `api_key` is
   set.
-- If the upload route answers 404, file uploads are off for your
-  organization. The process then stops uploading and listing files.
+- If the upload route says file uploads are off for your organization (a 403
+  whose `details.reason`, or `X-Convergent-Reason` header, is
+  `artifact_uploads_disabled`), the SDK logs once and pauses uploading and
+  listing files for 10 minutes, then asks again with the next file. A 401
+  ends uploading for the process. Any other error, a bare 404 included, drops
+  only that file.
+- Uploads carry `User-Agent: convergent-sdk-python/<version>`.
 - Pre-signed URLs are not supported yet.
 
 ### current_span()
@@ -700,7 +705,7 @@ the traced function returns, because a span that has not ended is not flushed.
 
 | Field | Type | Allowed values | Meaning |
 | --- | --- | --- | --- |
-| `ok` | `bool` | `True`, `False` | every flush call succeeded and delivered the spans it drained |
+| `ok` | `bool` | `True`, `False` | every flush call succeeded and delivered the spans it drained; with `uploads=True`, also no file still pending or dropped |
 | `pending` | `int` | — | spans still queued when the budget ran out |
 | `dropped` | `int` | — | spans thrown away since the last call, by a full queue or by an export that failed or was refused |
 | `elapsed_ms` | `int` | — | how long it took |

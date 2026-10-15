@@ -22,6 +22,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +30,7 @@ from collections import OrderedDict, deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from http.client import HTTPException
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -49,7 +51,7 @@ _ORIGINS: tuple[str, ...] = get_args(ArtifactOrigin)
 #: What the SDK does after one answer from ``PUT /v1/artifacts/{digest}``.
 #: ``refused`` is a final answer about the bytes, so the file is never sent
 #: again. ``fail`` drops it this time only, and a later span can send it again.
-Step = Literal["stored", "refused", "retry", "stop", "fail"]
+Step = Literal["stored", "refused", "retry", "pause", "stop", "fail"]
 
 #: ``open`` takes files. ``stopped`` means the upload route told this process to
 #: stop, and ``closed`` means the SDK shut down. Neither takes files again.
@@ -61,13 +63,35 @@ LIST_KEYS: Mapping[Role, str] = {
 }
 DROPPED_KEY = "convergent.artifacts.dropped"
 
-#: The route answers 404 when uploads are off for the organization and 401 for a
-#: bad key. Either ends uploading and file lists for the rest of the process.
-#: Any 2xx is stored, a retryable status is retried, and any other status drops
-#: that one file.
-_STOP_STATUS = frozenset({401, 404})
-#: Answers that depend only on the bytes and the organization.
-_REFUSED_STATUS = frozenset({409, 413, 422})
+#: The route says uploads are off for the organization with this error reason, and
+#: only with it, so a 403 or 404 from a proxy or a load balancer cannot turn
+#: uploads off. Uploading and file lists pause for ``_PAUSE_S``, then the next
+#: file asks again.
+_UPLOADS_OFF_REASON = "artifact_uploads_disabled"
+#: Carries the reason on answers that have no body, such as a HEAD.
+_REASON_HEADER = "X-Convergent-Reason"
+_PAUSE_S = 600.0
+#: A bad key ends uploading and file lists for the rest of the process.
+_STOP_STATUS = frozenset({401})
+#: Answers that depend only on the bytes and the organization. Any 2xx is stored,
+#: a retryable status is retried, and any other status drops that one file.
+_REFUSED_STATUS = frozenset({413, 422})
+#: Read of an error body, enough for its ``details.reason``.
+_ERROR_BODY_BYTES = 4096
+
+
+def _user_agent() -> str:
+    # Two names because this module can ship under either distribution name.
+    for distribution in ("convergent-sdk", "convergent"):
+        try:
+            return f"convergent-sdk-python/{version(distribution)}"
+        except PackageNotFoundError:
+            continue
+    return "convergent-sdk-python/0.0.0"
+
+
+#: Names the SDK and its version on every upload, so the server can tell clients apart.
+_USER_AGENT = _user_agent()
 
 #: OpenTelemetry drops span events past 128 and the normalizer rejects a span
 #: past 1,024 attributes and events, so files are packed into one attribute per
@@ -272,6 +296,8 @@ class _Uploader:
         self._url = f"{endpoint.rstrip('/')}/v1/artifacts/"
         self._authorization = f"Bearer {api_key}"
         self._state: _State = "open"
+        #: Until this ``time.monotonic()`` reading, the route said uploads are off.
+        self._paused_until = 0.0
         self._answered: OrderedDict[str, None] = OrderedDict()
         self._reset_runtime()
 
@@ -285,7 +311,7 @@ class _Uploader:
         self._thread: threading.Thread | None = None
 
     def accepting(self) -> bool:
-        return self._state == "open"
+        return self._state == "open" and time.monotonic() >= self._paused_until
 
     def offer(self, captures: list[_Capture]) -> None:
         with self._changed:
@@ -295,7 +321,11 @@ class _Uploader:
                 if capture.digest in self._pending or capture.digest in self._answered:
                     capture.body.close()
                     continue
-                if self._state != "open" or self._queued_bytes + capture.size_bytes > _QUEUE_BYTES:
+                if self._state == "open" and time.monotonic() < self._paused_until:
+                    # Uploads are off, which is not a failure: skipped, not dropped.
+                    capture.body.close()
+                    continue
+                if not self.accepting() or self._queued_bytes + capture.size_bytes > _QUEUE_BYTES:
                     self._dropped += 1
                     capture.body.close()
                     continue
@@ -344,6 +374,8 @@ class _Uploader:
                 step = "fail"
             if step == "stop":
                 self._stop()
+            elif step == "pause":
+                self._pause()
             with self._changed:
                 self._sending = None
                 self._pending.discard(capture.digest)
@@ -352,7 +384,7 @@ class _Uploader:
                     self._answered[capture.digest] = None
                     if len(self._answered) > _ANSWERED_DIGESTS:
                         self._answered.popitem(last=False)
-                if step != "stored":
+                if step not in ("stored", "pause"):
                     self._dropped += 1
                 self._changed.notify_all()
             capture.body.close()
@@ -366,8 +398,11 @@ class _Uploader:
             return self._sending
 
     def _deliver(self, capture: _Capture) -> Step:
-        if _route_holds(self._url + capture.digest, self._authorization, capture.size_bytes):
-            return "stored"
+        held = _route_holds(self._url + capture.digest, self._authorization, capture.size_bytes)
+        if held != "absent":
+            # The off answer comes before any bytes, which matters: a large PUT
+            # refused before its body is read ends in a broken pipe, not the 403.
+            return "stored" if held == "held" else "pause"
         body, headers = _encoded(capture, self._authorization)
         request = urllib.request.Request(
             self._url + capture.digest, data=body, headers=headers, method="PUT"
@@ -396,17 +431,29 @@ class _Uploader:
         _warn_once(
             "artifact_uploads_stopped",
             "Convergent stopped uploading files for this process: the upload route "
-            "answered 404 or 401. A 404 means file uploads are off for this "
-            "organization. Spans keep exporting and list no more files.",
+            "refused the API key. Spans keep exporting and list no more files.",
         )
 
-    def _discard_queued_locked(self) -> None:
-        """Drop and count every queued file. The caller holds ``_changed``."""
+    def _pause(self) -> None:
+        with self._changed:
+            self._paused_until = time.monotonic() + _PAUSE_S
+            self._discard_queued_locked(count=False)
+        _warn_once(
+            "artifact_uploads_paused",
+            "Convergent paused file uploads: the upload route says they are off. "
+            "Spans keep exporting and list no files until it asks again in "
+            f"{_PAUSE_S / 60:g} minutes.",
+        )
+
+    def _discard_queued_locked(self, *, count: bool = True) -> None:
+        """Drop every queued file, counting them unless uploads are off. The
+        caller holds ``_changed``."""
         for capture in self._queue:
             self._pending.discard(capture.digest)
             self._queued_bytes -= capture.size_bytes
             capture.body.close()
-        self._dropped += len(self._queue)
+        if count:
+            self._dropped += len(self._queue)
         self._queue.clear()
         self._changed.notify_all()
 
@@ -516,6 +563,7 @@ def _encoded(capture: _Capture, authorization: str) -> tuple[bytes, dict[str, st
     body = capture.body.read()
     headers = {
         "Authorization": authorization,
+        "User-Agent": _USER_AGENT,
         "Content-Type": capture.media_type,
         "X-Convergent-Trace-Id": capture.trace_id,
     }
@@ -529,21 +577,22 @@ def _encoded(capture: _Capture, authorization: str) -> tuple[bytes, dict[str, st
     return zstandard.compress(body), headers
 
 
-def _route_holds(url: str, authorization: str, size_bytes: int) -> bool:
+def _route_holds(url: str, authorization: str, size_bytes: int) -> Literal["held", "absent", "off"]:
     """Whether the workspace already holds the file: a 200 whose ``Content-Length``
-    is its size. Any other answer sends it, so a proxy that answers 200 to
-    everything cannot make uploads stop."""
-    request = urllib.request.Request(url, headers={"Authorization": authorization}, method="HEAD")
+    is its size. ``off`` when the route says uploads are off. Any other answer
+    sends it, so a proxy that answers 200 to everything cannot make uploads stop."""
+    request = urllib.request.Request(
+        url, headers={"Authorization": authorization, "User-Agent": _USER_AGENT}, method="HEAD"
+    )
     try:
         with _OPENER.open(request, timeout=_REQUEST_TIMEOUT_S) as response:
-            return response.status == 200 and response.headers.get("Content-Length") == str(
-                size_bytes
-            )
+            same_size = response.headers.get("Content-Length") == str(size_bytes)
+            return "held" if response.status == 200 and same_size else "absent"
     except urllib.error.HTTPError as error:
         error.close()
-        return False
+        return "off" if error.headers.get(_REASON_HEADER) == _UPLOADS_OFF_REASON else "absent"
     except (OSError, HTTPException):
-        return False
+        return "absent"
 
 
 def _put(request: urllib.request.Request) -> tuple[Step, float | None]:
@@ -552,15 +601,35 @@ def _put(request: urllib.request.Request) -> tuple[Step, float | None]:
         with _OPENER.open(request, timeout=_REQUEST_TIMEOUT_S) as response:
             return _step(response.status), None
     except urllib.error.HTTPError as error:
-        error.close()
-        return _step(error.code), _seconds(error.headers.get("Retry-After"))
+        try:
+            reason = error.headers.get(_REASON_HEADER) or _error_reason(
+                error.read(_ERROR_BODY_BYTES)
+            )
+        except (OSError, HTTPException):
+            reason = None
+        finally:
+            error.close()
+        return _step(error.code, reason), _seconds(error.headers.get("Retry-After"))
     except (OSError, HTTPException):
         return "retry", None
 
 
-def _step(status: int) -> Step:
+def _error_reason(body: bytes) -> str | None:
+    """``details.reason`` of the receiver's error body, if it has one."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return None
+    details = parsed.get("details") if isinstance(parsed, dict) else None
+    reason = details.get("reason") if isinstance(details, dict) else None
+    return reason if isinstance(reason, str) else None
+
+
+def _step(status: int, reason: str | None = None) -> Step:
     if 200 <= status < 300:
         return "stored"
+    if reason == _UPLOADS_OFF_REASON:
+        return "pause"
     if status in _STOP_STATUS:
         return "stop"
     if status in _REFUSED_STATUS:

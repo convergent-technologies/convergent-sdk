@@ -60,6 +60,8 @@ if (!order) {
   const puts = [];
   const held = new Map();
   let putStatus = 201;
+  // File uploads are off: HEAD answers 403 with the off reason in a header.
+  let off = false;
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -68,7 +70,9 @@ if (!order) {
     const decoders = { gzip: gunzipSync, zstd: zstdDecompressSync };
     const body = encoding ? decoders[encoding](raw) : raw;
     const digest = request.url.replace("/v1/artifacts/", "");
-    if (request.method === "HEAD") {
+    if (request.method === "HEAD" && off) {
+      response.writeHead(403, { "x-convergent-reason": "artifact_uploads_disabled" });
+    } else if (request.method === "HEAD") {
       const size = held.get(digest);
       response.writeHead(
         size === undefined ? 404 : 200,
@@ -206,14 +210,33 @@ if (!order) {
       [[digest(notes), "text/markdown"]],
     );
 
+    assert.match(puts[0].headers["user-agent"], /^convergent-sdk-typescript\/\d/);
+
+    // A bare 404, as a proxy or load balancer sends, drops only that file.
     putStatus = 404;
+    const proxied = Buffer.from("a file a proxy answered 404 for");
+    const stillListed = Buffer.from("a file after the bare 404");
+    second.span({ name: "proxied", operation: "tool_call" }, (call) => call.inputArtifact(proxied));
+    await second.flush({ uploads: true });
+    second.span({ name: "listed", operation: "tool_call" }, (call) =>
+      call.inputArtifact(stillListed),
+    );
+    await second.flush({ uploads: true });
+
+    // Only the route's own reason pauses uploads and file lists, and it comes
+    // on the HEAD, so the file's bytes are never sent.
+    putStatus = 201;
+    off = true;
     const refused = Buffer.from("first file after uploads were turned off");
-    const unlisted = Buffer.from("a file after the 404");
+    const unlisted = Buffer.from("a file while uploads are paused");
     second.span({ name: "refused", operation: "tool_call" }, (call) => call.inputArtifact(refused));
     await second.flush({ uploads: true });
     second.span({ name: "after", operation: "tool_call" }, (call) => call.inputArtifact(unlisted));
     await second.flush({ uploads: true });
-    assert.deepEqual(puts.map((put) => put.digest).slice(3), [digest(refused)]);
+    assert.deepEqual(puts.map((put) => put.digest).slice(3), [
+      digest(proxied),
+      digest(stillListed),
+    ]);
 
     const csvListing = `{"digest":"${digest(csv)}","size_bytes":${csv.length},"media_type":"application/octet-stream","filename":"${csvName}"}`;
     const exportedFiles = Buffer.concat(bodies);
@@ -227,7 +250,7 @@ if (!order) {
     }
     assert.ok(
       !exportedFiles.includes(Buffer.from(digest(unlisted))),
-      "A span after a 404 lists no file",
+      "A span while uploads are paused lists no file",
     );
     console.log(
       JSON.stringify({ ok: true, node: process.version, order, ...ids, uploads: puts.length }),
