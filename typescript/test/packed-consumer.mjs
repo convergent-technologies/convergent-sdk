@@ -43,8 +43,13 @@ if (!order) {
     const env = Object.fromEntries(
       Object.entries(process.env).filter(([key]) => !/^(OTEL_|CONVERGENT_)/u.test(key)),
     );
+    // CONSUMER_NODE runs the consumer on another Node.js, such as the oldest one
+    // package.json supports, while this script builds the package on the current one.
+    const consumerNode = process.env.CONSUMER_NODE || process.execPath;
+    const consumerVersion = execFileSync(consumerNode, ["--version"], { encoding: "utf8" }).trim();
+    console.log(`packed consumer: Node.js ${consumerVersion}`);
     for (const loadOrder of ["import-first", "require-first"]) {
-      execFileSync(process.execPath, [consumerScript, loadOrder], { env, stdio: "inherit" });
+      execFileSync(consumerNode, [consumerScript, loadOrder], { env, stdio: "inherit" });
     }
   } finally {
     await rm(consumer, { recursive: true, force: true });

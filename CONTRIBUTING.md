@@ -20,3 +20,11 @@ To work on the Python package locally:
     uv run pytest
     uv run ruff check src tests
     uv run pyrefly check
+
+To work on the TypeScript package locally, with Node.js 24 and pnpm:
+
+    cd typescript
+    pnpm --ignore-workspace install
+    pnpm lint
+    pnpm typecheck
+    pnpm test

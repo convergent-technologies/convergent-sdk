@@ -1,7 +1,6 @@
 {
   "name": "convergent-sdk",
   "version": "0.1.0",
-  "private": true,
   "description": "Record AI agent, model, and tool work with OpenTelemetry and Convergent.",
   "license": "Apache-2.0",
   "repository": {
@@ -20,6 +19,10 @@
   },
   "files": ["dist", "README.md", "LICENSE"],
   "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "engines": {
     "node": ">=22.15.0"
   },
