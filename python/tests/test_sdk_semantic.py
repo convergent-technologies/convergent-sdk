@@ -270,7 +270,6 @@ def test_agent_identity_fields_land_on_the_agent_span_alone(
 
     @convergent.agent(
         name="support-agent",
-        model="claude-opus-5",
         system_instructions="Triage support tickets.",
         tools=tools,
     )
@@ -281,7 +280,6 @@ def test_agent_identity_fields_land_on_the_agent_span_alone(
 
     by_name = {span.name: dict(span.attributes or {}) for span in exporter.get_finished_spans()}
     agent_attributes = by_name["invoke_agent support-agent"]
-    assert agent_attributes["convergent.agent.model"] == "claude-opus-5"
     assert agent_attributes["convergent.agent.system_instructions"] == "Triage support tickets."
     recorded_tools = agent_attributes["convergent.agent.tools"]
     assert isinstance(recorded_tools, str)
@@ -295,23 +293,24 @@ def test_agent_identity_fields_land_on_the_agent_span_alone(
     assert not any(key.startswith("convergent.agent.") for key in tool_attributes)
 
 
-def test_agent_identity_fields_are_dropped_outside_an_agent_run(
+def test_agent_prompt_and_tools_are_dropped_outside_an_agent_run(
     start_sdk: Callable[..., InMemorySpanExporter],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     exporter = start_sdk()
 
     with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
-        with convergent.span(name="gpt", operation="model_call", model="claude-opus-5"):
+        with convergent.span(
+            name="lookup", operation="tool_call", model="claude-opus-5", system_instructions="x"
+        ):
             pass
 
     attributes = exporter.get_finished_spans()[-1].attributes
     assert attributes is not None
     assert not any(key.startswith("convergent.agent.") for key in attributes)
-    reports = [r.getMessage() for r in caplog.records if "ignored model=" in r.getMessage()]
+    reports = [r.getMessage() for r in caplog.records if "Convergent ignored" in r.getMessage()]
     assert len(reports) == 1
-    assert "system_instructions=" not in reports[0]
-    assert "tools=" not in reports[0]
+    assert reports[0].startswith("Convergent ignored system_instructions=: ")
 
 
 def test_nested_calls_stay_on_the_process_provider_and_share_the_trace(

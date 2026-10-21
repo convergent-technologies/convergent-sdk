@@ -13,7 +13,7 @@ export const operations = new Map([
   ["generate_content", "generate_content"],
 ]);
 
-const reserved = new Set([
+export const reservedAttributeKeys: ReadonlySet<string> = new Set([
   "gen_ai.operation.name",
   "gen_ai.agent.name",
   "gen_ai.agent.version",
@@ -25,7 +25,7 @@ const reserved = new Set([
 ]);
 
 export function acceptedAttribute(key: string, value: unknown): value is AttributeValue {
-  if (typeof key !== "string" || key.startsWith("convergent.") || reserved.has(key)) {
+  if (typeof key !== "string" || key.startsWith("convergent.") || reservedAttributeKeys.has(key)) {
     reportOnce("reserved_attribute", "Convergent ignored an attribute key reserved by the SDK.");
     return false;
   }

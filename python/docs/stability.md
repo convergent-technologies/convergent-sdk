@@ -53,14 +53,14 @@ No names are deprecated today.
 ## What to pin
 
 ```text
-convergent-sdk>=0.0.10,<0.1
+convergent-sdk>=0.0.11,<0.1
 ```
 
 The upper bound keeps you on the 0.0.x line. Keep the exact version you test
 in your lockfile, and read the release notes before you update it. `session()`
 and the agent configuration arguments require 0.0.9 or newer. File
 attachments (`input_artifact()` and `output_artifact()`) require 0.0.10 or
-newer.
+newer. `model=` outside an agent run requires 0.0.11 or newer.
 
 ## Upgrading from 0.0.8
 

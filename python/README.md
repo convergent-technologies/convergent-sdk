@@ -9,7 +9,7 @@ Convergent workspace.
 pip install convergent-sdk
 ```
 
-For the APIs in these docs, use `convergent-sdk>=0.0.10,<0.1`.
+For the APIs in these docs, use `convergent-sdk>=0.0.11,<0.1`.
 While the SDK is on 0.x, a minor release may change the public API, and the
 upper bound keeps such a release out of a routine dependency update.
 [Stability](docs/stability.md) states the full policy.
@@ -125,9 +125,9 @@ trace keeps the same shape.
 
 ## Full Documentation
 The full documentation is under `python/docs/`: confirming a run arrived with `check()`,
-instrumenting your agent by hand, attaching to an existing OpenTelemetry setup, the
-integration packages, configuration, the API reference, the attribute spellings Convergent
-reads, and troubleshooting.
+instrumenting your agent by hand, attaching to an existing OpenTelemetry setup, attaching
+files to spans, the integration packages, configuration, the API reference, the attribute
+spellings Convergent reads, and troubleshooting.
 
 `skills/convergent-instrument/` and `skills/convergent-verify/` are the skills from the
 coding-agent section above.

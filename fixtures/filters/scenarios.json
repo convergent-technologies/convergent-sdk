@@ -1,0 +1,331 @@
+{
+  "description": "Reference cases for span filters that the Python and TypeScript SDKs handle the same way. Keys use the TypeScript option names. A proof runner loads each scenario in a fresh process: init() with `init` and `env`, then the `run` tree, then flush(). `expect.sent` names every span Convergent should receive and the convergent.attributes.* marks it should carry. A span not listed must not be sent. No CI job runs these cases yet. A scenario with `destination: file` runs without an API key and writes to a File destination, which the runner reads instead of the network capture.",
+  "nodes": {
+    "agent": "agent_run span named by the value. Span name is `invoke_agent <name>`.",
+    "span": "SDK span with `operation` (default retrieval) named by the value.",
+    "wrapped": "observe() wrapper called with `args`. `resolver` maps a contextAttributes key to an argument index, or is \"throw\" or \"async\" (an async resolver returning customer.id = acme).",
+    "raw": "Plain OpenTelemetry span from the tracer named `scope`, started in the active context with `attributes`. `lateAttributes` are set after it starts.",
+    "remote": "Runs `children` under a remote parent with this trace id and span id.",
+    "setContextAttributes": "Calls setContextAttributes with this object on the enclosing SDK span.",
+    "concurrent": "Runs these nodes at the same time.",
+    "sleep": "Waits this many milliseconds."
+  },
+  "scenarios": [
+    {
+      "name": "agents_allowed_and_excluded",
+      "init": { "agents": ["support"] },
+      "run": [
+        { "agent": "support", "children": [{ "span": "support.lookup" }] },
+        { "agent": "billing", "children": [{ "span": "billing.lookup" }] },
+        { "raw": "http.request", "scope": "app.http" }
+      ],
+      "expect": { "sent": { "invoke_agent support": {}, "support.lookup": {} } }
+    },
+    {
+      "name": "agents_empty_allowlist",
+      "init": { "agents": [] },
+      "run": [{ "agent": "support", "children": [{ "span": "support.lookup" }] }],
+      "expect": { "sent": {} }
+    },
+    {
+      "name": "agents_nested_undeclared",
+      "init": { "agents": ["support", "research"] },
+      "run": [
+        {
+          "agent": "research",
+          "children": [
+            {
+              "agent": "helper",
+              "children": [
+                { "span": "helper.lookup" },
+                { "raw": "helper.db", "scope": "app.db" }
+              ]
+            },
+            { "span": "research.after" }
+          ]
+        },
+        {
+          "agent": "billing",
+          "children": [{ "agent": "support", "children": [{ "span": "nested.support.lookup" }] }]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent research": {},
+          "research.after": {},
+          "invoke_agent support": {},
+          "nested.support.lookup": {}
+        }
+      }
+    },
+    {
+      "name": "attribute_sources",
+      "init": {
+        "requireSpanAttributes": { "customer.tier": "paid", "deploy.region": ["us", "eu"] },
+        "rejectSpanAttributes": { "customer.id": ["blocked"], "retry.count": [1] }
+      },
+      "env": { "OTEL_RESOURCE_ATTRIBUTES": "deploy.region=us" },
+      "run": [
+        {
+          "span": "stamped.paid.wins",
+          "attributes": { "customer.tier": "free" },
+          "contextAttributes": { "customer.tier": "paid" }
+        },
+        {
+          "span": "stamped.free.wins",
+          "attributes": { "customer.tier": "paid" },
+          "contextAttributes": { "customer.tier": "free" }
+        },
+        { "span": "bare.paid", "attributes": { "customer.tier": "paid" } },
+        { "span": "missing.tier" },
+        {
+          "span": "bare.region.overrides.resource",
+          "attributes": { "customer.tier": "paid", "deploy.region": "apac" }
+        },
+        {
+          "span": "rejected.by.mark",
+          "attributes": { "customer.tier": "paid" },
+          "contextAttributes": { "customer.id": "blocked" }
+        },
+        {
+          "span": "parent.marked",
+          "contextAttributes": { "customer.tier": "paid" },
+          "children": [{ "raw": "library.child", "scope": "app.lib" }]
+        },
+        { "span": "bool.not.number", "attributes": { "customer.tier": "paid", "retry.count": true } },
+        { "span": "number.rejected", "attributes": { "customer.tier": "paid", "retry.count": 1 } },
+        {
+          "raw": "raw.mark.paid",
+          "scope": "app.lib",
+          "attributes": { "convergent.attributes.customer.tier": "paid" }
+        },
+        {
+          "span": "stamp.beats.start",
+          "contextAttributes": { "customer.tier": "free" },
+          "children": [
+            {
+              "raw": "start.mark.loses",
+              "scope": "app.lib",
+              "attributes": { "convergent.attributes.customer.tier": "paid" }
+            },
+            {
+              "raw": "late.mark.wins",
+              "scope": "app.lib",
+              "lateAttributes": { "convergent.attributes.customer.tier": "paid" }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "stamped.paid.wins": { "convergent.attributes.customer.tier": "paid" },
+          "bare.paid": {},
+          "parent.marked": { "convergent.attributes.customer.tier": "paid" },
+          "library.child": { "convergent.attributes.customer.tier": "paid" },
+          "bool.not.number": {},
+          "raw.mark.paid": { "convergent.attributes.customer.tier": "paid" },
+          "late.mark.wins": { "convergent.attributes.customer.tier": "paid" }
+        }
+      }
+    },
+    {
+      "name": "reject_wins_over_require",
+      "init": {
+        "requireSpanAttributes": { "customer.tier": "paid" },
+        "rejectSpanAttributes": { "customer.tier": "paid" }
+      },
+      "run": [
+        {
+          "span": "contradiction",
+          "attributes": { "customer.tier": "free" },
+          "contextAttributes": { "customer.tier": "paid" }
+        }
+      ],
+      "expect": { "sent": {} }
+    },
+    {
+      "name": "reject_resource_key",
+      "init": { "rejectSpanAttributes": { "deploy.region": "blocked" } },
+      "env": { "OTEL_RESOURCE_ATTRIBUTES": "deploy.region=blocked" },
+      "run": [
+        { "span": "resource.blocked" },
+        { "span": "bare.allowed", "attributes": { "deploy.region": "us" } }
+      ],
+      "expect": { "sent": { "bare.allowed": {} } }
+    },
+    {
+      "name": "concurrent_requests",
+      "init": { "requireSpanAttributes": { "customer.id": ["acme", "globex"] } },
+      "run": [
+        {
+          "concurrent": [
+            {
+              "agent": "support",
+              "contextAttributes": { "customer.id": "acme", "request.id": "r1" },
+              "children": [
+                { "sleep": 20 },
+                { "span": "r1.before" },
+                { "setContextAttributes": { "customer.id": "globex", "stage": "late" } },
+                { "sleep": 20 },
+                { "span": "r1.after" }
+              ]
+            },
+            {
+              "agent": "triage",
+              "contextAttributes": { "customer.id": "initech", "request.id": "r2" },
+              "children": [
+                { "sleep": 10 },
+                { "span": "r2.child" },
+                { "sleep": 20 },
+                {
+                  "span": "r2.override",
+                  "contextAttributes": { "customer.id": "acme" },
+                  "children": [{ "raw": "r2.override.library", "scope": "app.lib" }]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent support": {
+            "convergent.attributes.customer.id": "globex",
+            "convergent.attributes.request.id": "r1",
+            "convergent.attributes.stage": "late"
+          },
+          "r1.before": {
+            "convergent.attributes.customer.id": "acme",
+            "convergent.attributes.request.id": "r1"
+          },
+          "r1.after": {
+            "convergent.attributes.customer.id": "globex",
+            "convergent.attributes.request.id": "r1",
+            "convergent.attributes.stage": "late"
+          },
+          "r2.override": {
+            "convergent.attributes.customer.id": "acme",
+            "convergent.attributes.request.id": "r2"
+          },
+          "r2.override.library": {
+            "convergent.attributes.customer.id": "acme",
+            "convergent.attributes.request.id": "r2"
+          }
+        }
+      }
+    },
+    {
+      "name": "resolver_from_arguments",
+      "init": { "requireSpanAttributes": { "customer.id": "acme" } },
+      "run": [
+        {
+          "wrapped": "resolved.acme",
+          "args": ["acme"],
+          "resolver": { "customer.id": 0 },
+          "children": [{ "span": "resolved.acme.child" }]
+        },
+        { "wrapped": "resolved.other", "args": ["other"], "resolver": { "customer.id": 0 } },
+        { "wrapped": "resolver.async", "args": ["acme"], "resolver": "async" },
+        {
+          "wrapped": "resolver.throws",
+          "args": ["acme"],
+          "resolver": "throw",
+          "children": [{ "span": "resolver.throws.child", "contextAttributes": { "customer.id": "acme" } }]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "resolved.acme": { "convergent.attributes.customer.id": "acme" },
+          "resolved.acme.child": { "convergent.attributes.customer.id": "acme" }
+        }
+      }
+    },
+    {
+      "name": "invalid_empty_rules",
+      "init": { "requireSpanAttributes": {} },
+      "run": [{ "agent": "support" }],
+      "expect": { "enabled": false, "sent": {} }
+    },
+    {
+      "name": "invalid_padded_key",
+      "init": { "rejectSpanAttributes": { " customer.id": "x" } },
+      "run": [{ "agent": "support" }],
+      "expect": { "enabled": false, "sent": {} }
+    },
+    {
+      "name": "invalid_null_value",
+      "init": { "requireSpanAttributes": { "customer.id": null } },
+      "run": [{ "agent": "support" }],
+      "expect": { "enabled": false, "sent": {} }
+    },
+    {
+      "name": "invalid_env_json",
+      "env": { "CONVERGENT_REQUIRE_SPAN_ATTRIBUTES": "{not json" },
+      "run": [{ "agent": "support" }],
+      "expect": { "enabled": false, "sent": {} }
+    },
+    {
+      "name": "invalid_agents",
+      "init": { "agents": ["support", " "] },
+      "run": [{ "agent": "support" }],
+      "expect": { "enabled": false, "sent": {} }
+    },
+    {
+      "name": "env_rules_and_explicit_override",
+      "init": { "rejectSpanAttributes": { "customer.id": "blocked" } },
+      "env": {
+        "CONVERGENT_REQUIRE_SPAN_ATTRIBUTES": "{\"customer.id\": [\"acme\", \"blocked\"]}",
+        "CONVERGENT_REJECT_SPAN_ATTRIBUTES": "{\"customer.id\": [\"acme\"]}"
+      },
+      "run": [
+        { "span": "env.acme", "contextAttributes": { "customer.id": "acme" } },
+        { "span": "env.blocked", "contextAttributes": { "customer.id": "blocked" } }
+      ],
+      "expect": { "sent": { "env.acme": { "convergent.attributes.customer.id": "acme" } } }
+    },
+    {
+      "name": "file_destination",
+      "destination": "file",
+      "init": { "agents": ["support", "triage"], "requireSpanAttributes": { "customer.tier": "paid" } },
+      "run": [
+        {
+          "agent": "support",
+          "contextAttributes": { "customer.tier": "paid" },
+          "children": [{ "span": "file.paid.child" }]
+        },
+        { "agent": "triage", "contextAttributes": { "customer.tier": "free" } },
+        { "agent": "billing", "contextAttributes": { "customer.tier": "paid" } }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent support": { "convergent.attributes.customer.tier": "paid" },
+          "file.paid.child": { "convergent.attributes.customer.tier": "paid" }
+        }
+      }
+    },
+    {
+      "name": "cross_process",
+      "init": { "agents": ["support"] },
+      "run": [
+        {
+          "remote": { "traceId": "11111111111111111111111111111111", "spanId": "2222222222222222" },
+          "children": [
+            { "raw": "remote.genai", "scope": "app.http", "attributes": { "gen_ai.request.model": "m" } },
+            { "raw": "remote.litellm", "scope": "litellm.router" },
+            { "raw": "remote.litellm_proxy", "scope": "litellm_proxy" },
+            { "raw": "remote.plain", "scope": "app.http" },
+            { "span": "remote.sdk.span" },
+            { "agent": "billing", "children": [{ "span": "remote.billing.child" }] }
+          ]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "remote.genai": {},
+          "remote.litellm": {},
+          "remote.sdk.span": {}
+        }
+      }
+    }
+  ]
+}

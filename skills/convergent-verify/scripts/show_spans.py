@@ -15,6 +15,7 @@ MODEL_CALL = "chat"
 TOOL_CALL = "execute_tool"
 LITELLM_SCOPE = "litellm"
 TREE_LINE_CAP = 60
+ISSUE_SPAN_CAP = 3
 
 OPERATION_ROLES = {
     AGENT_RUN: AGENT_RUN,
@@ -39,19 +40,11 @@ LITELLM_OPERATIONS = {
     "aembedding": "embeddings",
 }
 
+SESSION_KEYS = ("gen_ai.conversation.id", "convergent.session.id", "session.id")
+USAGE_KEYS = ("gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens")
 SUMMARY_KEYS = {
-    AGENT_RUN: (
-        "gen_ai.agent.name",
-        "gen_ai.agent.version",
-        "gen_ai.conversation.id",
-        "convergent.session.id",
-        "session.id",
-    ),
-    MODEL_CALL: (
-        "gen_ai.request.model",
-        "gen_ai.usage.input_tokens",
-        "gen_ai.usage.output_tokens",
-    ),
+    AGENT_RUN: ("gen_ai.agent.name", "gen_ai.agent.version", *SESSION_KEYS),
+    MODEL_CALL: ("gen_ai.request.model", *USAGE_KEYS),
     TOOL_CALL: ("gen_ai.tool.name", "gen_ai.tool.call.id"),
 }
 
@@ -63,6 +56,7 @@ CONTENT_KEYS = {
     "gen_ai.tool.call.arguments": "arguments",
     "gen_ai.tool.call.result": "result",
 }
+MESSAGE_KEYS = ("gen_ai.input.messages", "gen_ai.output.messages")
 
 
 class RecordingError(Exception):
@@ -236,7 +230,7 @@ def _summary(span: Span) -> str:
     parts: list[str] = []
     for key in SUMMARY_KEYS.get(span.role, ()):
         value = span.attributes.get(key)
-        if key in {"gen_ai.conversation.id", "convergent.session.id", "session.id"}:
+        if key in SESSION_KEYS:
             if value is None:
                 continue
             label = key
@@ -258,12 +252,7 @@ def counts(spans: list[Span], total: int) -> list[str]:
     operations = Counter(span.operation or "(unset)" for span in spans)
     scopes = Counter(span.scope for span in spans)
     models = [span for span in spans if span.role == MODEL_CALL]
-    with_usage = sum(
-        1
-        for span in models
-        if "gen_ai.usage.input_tokens" in span.attributes
-        or "gen_ai.usage.output_tokens" in span.attributes
-    )
+    with_usage = sum(1 for span in models if any(key in span.attributes for key in USAGE_KEYS))
     release_fields: set[str] = set()
     for span in spans:
         for attributes, key in (
@@ -299,6 +288,50 @@ def counts(spans: list[Span], total: int) -> list[str]:
         + ", ".join(f"{_clip(key)}={value}" for key, value in sorted(operations.items())),
         "scopes: " + ", ".join(f"{_clip(key)}={value}" for key, value in sorted(scopes.items())),
     ]
+
+
+def issues(spans: list[Span]) -> list[tuple[str, str]]:
+    """Gaps the verify skill reports as issues unless the setup explains them.
+
+    Empty content counts as missing. A usage key counts as present even at 0,
+    as in counts().
+    """
+    _, children = _tree_index(spans)
+    sessions_used = any(span.role == AGENT_RUN and _has_session(span) for span in spans)
+    found: list[tuple[str, str]] = []
+    for span in spans:
+        label = f"{_clip(span.name)} (span {_clip(span.span_id)})"
+        if span.role == MODEL_CALL:
+            for key in MESSAGE_KEYS:
+                if not span.attributes.get(key):
+                    found.append((f"model call with no {CONTENT_KEYS[key]} content", label))
+            if not any(key in span.attributes for key in USAGE_KEYS):
+                found.append(("model call with no token usage", label))
+        elif span.role == AGENT_RUN:
+            if not children.get((span.trace_id, span.span_id)):
+                found.append(("agent run with no child span", label))
+            if sessions_used and not _has_session(span):
+                found.append(("agent run with no session id", label))
+    return found
+
+
+def render_issues(found: list[tuple[str, str]], *, full: bool) -> list[str]:
+    """One count per issue kind, then the first ISSUE_SPAN_CAP spans unless full."""
+    groups: dict[str, list[str]] = {}
+    for kind, label in found:
+        groups.setdefault(kind, []).append(label)
+    lines: list[str] = []
+    for kind, labels in groups.items():
+        lines.append(f"{kind}: {len(labels)} span{'s' if len(labels) != 1 else ''}")
+        shown = labels if full else labels[:ISSUE_SPAN_CAP]
+        lines.extend(f"  {label}" for label in shown)
+        if len(shown) < len(labels):
+            lines.append(f"  ... {len(labels) - len(shown)} more; pass --full to list all")
+    return lines
+
+
+def _has_session(span: Span) -> bool:
+    return any(span.attributes.get(key) for key in SESSION_KEYS)
 
 
 def _tree_index(
@@ -366,7 +399,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("target", type=Path, help="a spans file or directory")
     parser.add_argument("--agent", help="the gen_ai.agent.name subtree to render")
     parser.add_argument("--show-content", action="store_true", help="show recorded content values")
-    parser.add_argument("--full", action="store_true", help="show the full tree")
+    parser.add_argument("--full", action="store_true", help="show all tree lines and issue spans")
     args = parser.parse_args(argv)
 
     try:
@@ -384,6 +417,10 @@ def main(argv: list[str]) -> int:
     )
     print("counts:")
     for line in counts(selected, total=len(spans)):
+        print(f"  {line}")
+    found = issues(selected)
+    print("issues:" if found else "issues: none")
+    for line in render_issues(found, full=args.full):
         print(f"  {line}")
     print("tree:")
     for line in render_tree(selected, show_content=args.show_content, full=args.full):

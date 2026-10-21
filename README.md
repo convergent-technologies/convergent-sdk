@@ -120,9 +120,9 @@ trace keeps the same shape.
 
 ## Full Documentation
 The full documentation is under `python/docs/`: confirming a run arrived with `check()`,
-instrumenting your agent by hand, attaching to an existing OpenTelemetry setup, the
-integration packages, configuration, the API reference, the attribute spellings Convergent
-reads, and troubleshooting.
+instrumenting your agent by hand, attaching to an existing OpenTelemetry setup, attaching
+files to spans, the integration packages, configuration, the API reference, the attribute
+spellings Convergent reads, and troubleshooting.
 
 `skills/convergent-instrument/` and `skills/convergent-verify/` are the skills from the
 coding-agent section above.

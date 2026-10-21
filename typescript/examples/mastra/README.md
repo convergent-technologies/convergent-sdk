@@ -48,9 +48,10 @@ A printed trace ID and exit code 0 do not confirm that Convergent received the t
 `tracerProvider()` to `OtelBridge`, so Mastra's spans use the Convergent export path.
 It waits for Mastra's pending work before calling the SDK's `flush()`.
 
-Mastra adds the agent name when a span ends. That name is unavailable when the
-span starts, so it cannot support selecting an entire branch for export at that
-point.
+Mastra adds the agent name when a span ends. The SDK's `agents` filter decides
+when a span starts, so it cannot use that name. Leave `agents` unset with the
+bridge. The native exporter sends without the SDK, so the SDK's filters and
+session metadata do not apply to it.
 
 With these pinned packages, model spans omit `gen_ai.input.messages`. Stored
 model input messages are therefore empty in both paths. Model output, token
