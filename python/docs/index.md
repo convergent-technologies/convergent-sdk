@@ -124,6 +124,7 @@ goes in the same place and gives the same trace shape.
 
 - [Instrument with a coding agent](agent-skill.md): what the skills do.
 - [OpenTelemetry](opentelemetry.md): attach to an existing OpenTelemetry setup and filter spans.
+- [Attach files to spans](attach-files.md): record the files a span read or wrote.
 - [Integrations](integrations/index.md): the integration packages.
 - [Configuration](configuration.md): every argument and environment variable.
 - [API reference](reference/api.md): every public function.

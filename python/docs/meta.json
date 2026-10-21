@@ -5,6 +5,7 @@
     "agent-skill",
     "integrations",
     "opentelemetry",
+    "attach-files",
     "---Reference---",
     "configuration",
     "reference/api",

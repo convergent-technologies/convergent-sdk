@@ -139,7 +139,6 @@ _RESERVED_ATTRIBUTE_KEYS = frozenset(
         "gen_ai.tool.call.result",
     }
 )
-_AGENT_MODEL_KEY = "convergent.agent.model"
 _AGENT_SYSTEM_INSTRUCTIONS_KEY = "convergent.agent.system_instructions"
 _AGENT_TOOLS_KEY = "convergent.agent.tools"
 _SESSION_CONTEXT_KEYS = frozenset(("gen_ai.conversation.id", "session.id", _processors.SESSION_KEY))
@@ -411,11 +410,12 @@ def observe(
     callable that raises, or that returns something that is not a Mapping, is
     logged once and the span is recorded with no context pairs.
 
-    ``model``, ``system_instructions``, and ``tools`` describe the agent as
-    configured: the model it calls, the prompt it runs with, and the tool
-    definitions it offers. They apply when the operation resolves to
-    ``invoke_agent``, which ``agent_run`` and ``operation="invoke_agent"`` both
-    do, and land on that one span, ``tools`` as one JSON string.
+    ``model`` is the model the span asks for and lands as ``gen_ai.request.model``
+    on any operation. ``system_instructions`` and ``tools`` describe the agent as
+    configured: the prompt it runs with and the tool definitions it offers. They
+    apply when the operation resolves to ``invoke_agent``, which ``agent_run`` and
+    ``operation="invoke_agent"`` both do, and land on that one span, ``tools`` as
+    one JSON string.
 
     Never raises. A name outside 1-128 characters or an unrecognized operation is
     logged and the span is still recorded -- ingest is where a bad name is
@@ -662,11 +662,9 @@ def span(
     if isinstance(attributes, Mapping):
         span_attributes.update({k: v for k, v in attributes.items() if _accepted(k, v)})
     span_name = name
-    agent_identity = {
-        "model=": model,
-        "system_instructions=": system_instructions,
-        "tools=": tools,
-    }
+    if model is not None:
+        span_attributes["gen_ai.request.model"] = model
+    agent_identity = {"system_instructions=": system_instructions, "tools=": tools}
     passed = [label for label, value in agent_identity.items() if value is not None]
     if operation_name != "invoke_agent" and passed:
         _report_once(
@@ -678,8 +676,6 @@ def span(
         span_attributes["gen_ai.agent.name"] = name
         if state.release is not None:
             span_attributes["gen_ai.agent.version"] = state.release
-        if model is not None:
-            span_attributes[_AGENT_MODEL_KEY] = model
         if system_instructions is not None:
             span_attributes[_AGENT_SYSTEM_INSTRUCTIONS_KEY] = system_instructions
         if tools is not None:

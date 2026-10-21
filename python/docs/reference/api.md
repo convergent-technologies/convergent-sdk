@@ -328,16 +328,18 @@ input and output inside the decorated function, use
   `reject_span_attributes=` is configured, the span is withheld, so an
   untagged span cannot get past a filter.
   [span()](#span) states the full rules for both parameters.
-- **`model`** (`str`, optional), **`system_instructions`** (`str`, optional),
-  and **`tools`** (`Sequence[Mapping[str, Any]]`, optional): how the agent is
-  configured. `model` is the model it calls, `system_instructions` is the
-  prompt it runs with, and `tools` is the tool definitions it offers. They
-  apply when the operation resolves to `invoke_agent`, as both `agent_run` and
-  `operation="invoke_agent"` do. They land on that one span, with `tools` as
-  one JSON string. On other operations the SDK ignores them and logs the
-  reason. They only describe the agent. They do not configure its model client
-  or run its tools. `tools` accepts a sequence of JSON-safe mappings, including
-  OpenAI-style `{"type": "function", "function": {...}}` definitions and
+- **`model`** (`str`, optional): the model the span asks for. It lands as
+  `gen_ai.request.model` on any operation. On an agent run it is the model the
+  agent calls. It only records the name and does not configure a model client.
+- **`system_instructions`** (`str`, optional) and **`tools`**
+  (`Sequence[Mapping[str, Any]]`, optional): how the agent is configured.
+  `system_instructions` is the prompt it runs with, and `tools` is the tool
+  definitions it offers. They apply when the operation resolves to
+  `invoke_agent`, as both `agent_run` and `operation="invoke_agent"` do. They
+  land on that one span, with `tools` as one JSON string. On other operations
+  the SDK ignores them and logs the reason. They only describe the agent. They
+  do not run its tools. `tools` accepts a sequence of JSON-safe mappings,
+  including OpenAI-style `{"type": "function", "function": {...}}` definitions and
   Anthropic-style `{"name": ..., "input_schema": ...}` definitions.
   See [agent configuration attributes](attributes.md#operation-and-identity)
   for the recorded keys and their precedence.
@@ -501,15 +503,17 @@ become a tool call. See [span kinds](attributes.md#fields-kept-for-each-span-kin
 for the fields each kind keeps.
 
 An `agent_run` also writes `gen_ai.agent.name`, and `gen_ai.agent.version` when
-the process reported a release. When passed, it writes `convergent.agent.model`,
-`convergent.agent.system_instructions`, and `convergent.agent.tools`, the last
-as one JSON string. A `tool_call` writes `gen_ai.tool.name`, and
-`gen_ai.tool.type` as `function` unless you pass your own.
+the process reported a release. When passed, it writes
+`convergent.agent.system_instructions` and `convergent.agent.tools`, the last as
+one JSON string. A `tool_call` writes `gen_ai.tool.name`, and `gen_ai.tool.type`
+as `function` unless you pass your own. Any operation writes
+`gen_ai.request.model` when `model` is passed.
 
-These two are also the only operations whose span names the SDK rewrites. An
-`agent_run` span is named `invoke_agent <name>`, and a `tool_call` span is
-named `execute_tool <name>`. Every other operation keeps the name you gave it,
-so `span(name="gpt-5.5", operation="model_call")` appears as `gpt-5.5`.
+`agent_run` and `tool_call` are also the only operations whose span names the
+SDK rewrites. An `agent_run` span is named `invoke_agent <name>`, and a
+`tool_call` span is named `execute_tool <name>`. Every other operation keeps
+the name you gave it, so `span(name="gpt-5.5", operation="model_call")` appears
+as `gpt-5.5`.
 
 The OpenTelemetry conventions name three tool types:
 
@@ -617,9 +621,10 @@ Limits:
 
 - A span lists at most 100 files.
 - Spans that have not ended hold at most 128 MiB of copies across the process.
-- The SDK logs a file and counts it in `convergent.artifacts.dropped` when the
-  file is past either limit, larger than 16 MiB, unreadable, or has a
-  `media_type` that is not printable ASCII of at most 255 characters.
+- The SDK counts a file in `convergent.artifacts.dropped` when the file is
+  past either limit, larger than 16 MiB, unreadable, or has a `media_type` that
+  is not printable ASCII of at most 255 characters. It logs each of these,
+  except a file past the 100-file limit, which is only counted.
 - A filename longer than 1,024 characters is logged once and left off the
   listing; the file is still recorded.
 - Files are recorded only on spans the SDK opened, and only when `api_key` is

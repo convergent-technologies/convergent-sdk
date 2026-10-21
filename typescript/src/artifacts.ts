@@ -13,6 +13,7 @@ import { context, ROOT_CONTEXT, type Span } from "@opentelemetry/api";
 import { suppressTracing } from "@opentelemetry/core";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { reportOnce } from "./diagnostics.js";
+import { version } from "./version.js";
 
 export type ArtifactOrigin = "user" | "agent" | "model" | "tool" | "external";
 
@@ -45,8 +46,6 @@ interface Answer {
   body: string;
 }
 
-declare const __CONVERGENT_SDK_VERSION__: string;
-
 const listKeys: Record<Role, string> = {
   input: "convergent.artifacts.input",
   output: "convergent.artifacts.output",
@@ -63,7 +62,7 @@ const pauseMs = 10 * 60_000;
 const stopStatus = new Set([401]);
 const refusedStatus = new Set([413, 422]);
 const errorBodyBytes = 4096;
-const userAgent = `convergent-sdk-typescript/${typeof __CONVERGENT_SDK_VERSION__ === "string" ? __CONVERGENT_SDK_VERSION__ : "0.0.0"}`;
+const userAgent = `convergent-sdk-typescript/${version}`;
 const retryableStatus = new Set([429, 500, 502, 503, 504]);
 const MiB = 1024 * 1024;
 // Files are packed into one attribute per role, so a span's count is capped.
@@ -143,14 +142,15 @@ export class Artifacts {
     }
   }
 
-  spanEnded(span: ReadableSpan): void {
+  // A span the filters withhold releases its files without sending them.
+  spanEnded(span: ReadableSpan, send: boolean): void {
     try {
       const { spanId } = span.spanContext();
       const held = this.held.get(spanId);
       if (!held) return;
       this.held.delete(spanId);
       for (const capture of held.captures) this.heldBytes -= capture.sizeBytes;
-      this.offer(held.captures);
+      if (send) this.offer(held.captures);
     } catch {
       reportOnce("artifact_offer_failed", "Convergent could not queue a span's files.");
     }

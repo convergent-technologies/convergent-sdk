@@ -4,6 +4,16 @@ Each released version has a `## <version>` section here, and the release
 workflow publishes that section as the GitHub Release notes. The newest
 section may describe a version whose tag does not exist yet.
 
+## 0.0.11
+
+- `model=` records the model as `gen_ai.request.model` on every operation.
+  Agent runs now send `gen_ai.request.model` instead of
+  `convergent.agent.model`. Convergent still reads the old key, so spans from
+  0.0.10 and older keep working, and an agent run keeps the same agent version
+  across the upgrade. On a model call Convergent reads it as the requested
+  model. Earlier versions dropped `model=` outside an agent run and logged
+  that it describes an agent run.
+
 ## 0.0.10
 
 - `input_artifact()` and `output_artifact()` on a span record a file the span
