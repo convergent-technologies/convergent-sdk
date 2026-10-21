@@ -5,9 +5,9 @@
 # These jobs execute freshly released third-party code, and no workflow in this
 # repository restores GitHub Actions caches. That is load-bearing: cache writes
 # need no permissions grant, default-branch cache entries are restorable by
-# every workflow, and the release workflow publishes to PyPI, so adding cache
-# restore here (e.g. setup-uv with enable-cache) would connect code run in
-# these jobs to the publish path.
+# every workflow, and the release workflows publish to PyPI and npm, so adding
+# cache restore here (e.g. setup-uv with enable-cache) would connect code run
+# in these jobs to the publish path.
 name: Weekly newest deps
 
 permissions:

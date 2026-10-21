@@ -1,4 +1,4 @@
-name: CI
+name: CI Python
 
 permissions:
   contents: read
@@ -9,6 +9,10 @@ on:
   pull_request:
   # release.yml runs these same jobs as its pre-publish gate.
   workflow_call:
+
+concurrency:
+  group: ci-python-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 env:
   UV_VERSION: "0.11.14"

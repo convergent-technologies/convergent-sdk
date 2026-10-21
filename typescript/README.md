@@ -5,10 +5,19 @@ records agent runs, model calls, and tool calls as OpenTelemetry spans and sends
 them to Convergent. Requires Node.js 22.15 or newer. Both `import` and `require`
 load the same ES module.
 
+## Install
+
+```sh
+npm install convergent-sdk @opentelemetry/api
+```
+
+`@opentelemetry/api` is a peer dependency. Install it beside the SDK so your
+application and the SDK share one copy.
+
 ## Build from source
 
-The package is built from the `typescript/` directory of the SDK repository
-(`sdks/typescript/` in the monorepo). It has its own dependencies and lockfile.
+The package is built from the `typescript/` directory of the SDK repository.
+It has its own dependencies and lockfile.
 
 ```sh
 pnpm --ignore-workspace install
