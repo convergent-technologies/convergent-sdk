@@ -1,16 +1,22 @@
 {
-  "title": "Python SDK",
+  "title": "Python",
+  "root": true,
   "pages": [
     "index",
-    "agent-skill",
+    "---Instrumentation---",
+    "coding-agent",
     "integrations",
     "opentelemetry",
     "attach-files",
+    "span-filters",
+    "local-files",
+    "record-by-hand",
     "---Reference---",
-    "configuration",
     "reference/api",
-    "reference/attributes",
+    "configuration",
+    "attributes",
+    "troubleshooting",
     "stability",
-    "troubleshooting"
+    "reference/changelog"
   ]
 }

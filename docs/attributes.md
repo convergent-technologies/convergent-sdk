@@ -5,8 +5,10 @@ description: Attribute read order, accepted values, span kinds, and custom field
 
 Convergent reads the attributes on each span and its OpenTelemetry resource.
 The tables below list each field and the order Convergent reads its keys in.
-Each attribute name is a key your instrumentation can send, not a Python SDK
-argument. For the SDK's recording methods, see the [API reference](api.md).
+Each attribute name is a key your instrumentation can send, not an SDK
+argument. Both SDKs write the same attributes. For their recording methods, see
+the API reference for [Python](../python/docs/reference/api.md) or
+[TypeScript](../typescript/docs/reference/api.md).
 
 ## Attribute precedence
 
@@ -21,15 +23,14 @@ With the first key absent, its input token count is `12`.
 
 For direct attributes, zero, false, null, and empty values count as present.
 Presence decides which value to check. The [value rules](#accepted-values)
-decide whether it is usable. For example, `convergent.stream=False` wins over
-`gen_ai.is_streaming=True` and records `False`.
+decide whether it is usable. For example, `convergent.stream=false` wins over
+`gen_ai.is_streaming=true` and records `false`.
 
-```python
-for key in keys_in_read_order:
-    if key in attributes:
-        value = attributes[key]
-        return normalize(value) if valid(value) else None
-return None
+```text
+for each key, in read order:
+    if the span has the key:
+        return its value if the value is valid, else nothing
+return nothing
 ```
 
 Keys in the tables are span attributes unless marked **resource**. The marks
@@ -176,12 +177,12 @@ sending it. A rejected value leaves its field empty, with two exceptions:
 
 | Fields | Accepted value | Example and result |
 | --- | --- | --- |
-| Operation, model names, provider, agent name/version, IDs, release, tool name/type/description, error type | A nonblank string. Whitespace in a valid string stays unchanged. | `" gpt-4o "` stays `" gpt-4o "`; `"   "`, `7`, and `False` are rejected. |
+| Operation, model names, provider, agent name/version, IDs, release, tool name/type/description, error type | A nonblank string. Whitespace in a valid string stays unchanged. | `" gpt-4o "` stays `" gpt-4o "`; `"   "`, `7`, and `false` are rejected. |
 | Session ID | The string rule above, at most 128 characters. | A 129-character string is rejected, not shortened. |
 | Release and parent trajectory ID | The string rule above, at most 256 characters. | A 257-character release is rejected. |
-| All six token counts | An integer from `0` through `2**63 - 1`, excluding booleans. | `12` and `0` work; `12.0`, `"12"`, `True`, `-1`, and `2**63` do not. |
-| Cost and time to first chunk | A finite, nonnegative integer or float, excluding booleans. | `0.25` and `0` work; `"0.25"`, `True`, `-1`, infinity, and NaN do not. |
-| Streaming | A boolean. | `False` works; `0` and `"false"` do not. |
+| All six token counts | An integer from `0` through `2**63 - 1`, excluding booleans. | `12` and `0` work; `12.0`, `"12"`, `true`, `-1`, and `2**63` do not. |
+| Cost and time to first chunk | A finite, nonnegative integer or float, excluding booleans. | `0.25` and `0` work; `"0.25"`, `true`, `-1`, infinity, and NaN do not. |
+| Streaming | A boolean. | `false` works; `0` and `"false"` do not. |
 | Input and output messages | A list of objects, or a JSON string that decodes to one. | `'[{"role":"user","content":"Hello"}]'` becomes that list; `"Hello"`, `{}`, and `[1]` are rejected. |
 | Finish reasons | A string or a list of strings. | `"stop"` becomes `["stop"]`; `[]` stays `[]`; `[1]` is rejected. |
 | Tool arguments/result and general input/output | A valid JSON value. Strings stay strings. | `'{}'` stays the string `'{}'`; `{"id": 7}` stays an object; null stays null. |
@@ -216,7 +217,7 @@ A JSON string that contains one of these lists follows the same rules.
 | `[]` or `"[]"` | No messages. |
 | `"[broken"` | One system message whose text is `[broken`. |
 | `[1,2]` | One system message whose text is `[1,2]`. |
-| `7`, `False`, or an object | Rejected. |
+| `7`, `false`, or an object | Rejected. |
 
 For example, these input text parts:
 
@@ -268,7 +269,7 @@ and objects with string keys. These limits apply:
 - Integers must fit within 16,384 bits and serialize successfully.
 - Invalid Unicode strings are rejected.
 
-For example, the Python value `{"enabled": False, "limits": [0, 2]}` is valid.
+For example, the JSON value `{"enabled": false, "limits": [0, 2]}` is valid.
 A set, an object with an integer key, or a list containing NaN is invalid. The
 same limits apply to custom values and to decoded messages and tools.
 
@@ -285,7 +286,8 @@ The operation decides which kind of span Convergent records.
 
 The SDK translates `operation="agent_run"` to `invoke_agent`, `model_call` to
 `chat`, and `tool_call` to `execute_tool` before export. See the full
-[SDK operation list](api.md#operations). A raw `toolcall` operation records a
+operation list for [Python](../python/docs/reference/api.md#operations) or
+[TypeScript](../typescript/docs/reference/api.md#operations). A raw `toolcall` operation records a
 generic span with operation `toolcall`.
 
 Without a valid operation, Convergent infers the kind in this order:

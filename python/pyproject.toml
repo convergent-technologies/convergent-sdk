@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.4"]
 build-backend = "hatchling.build"
 
 [project]
@@ -64,7 +64,6 @@ packages = ["src/convergent"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/**", "/README.md", "/LICENSE"]
-exclude = [".gitignore"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,27 +1,30 @@
 # Publishes the Python SDK to PyPI and posts the GitHub Release.
 #
-# Pushing a tag like v0.0.5 runs ci-python.yml and the release preflight
+# Pushing a tag like python-v0.0.12 runs ci-python.yml and the release preflight
 # (.github/scripts/release-preflight.sh: the tag names the version in
 # python/pyproject.toml, is on main, and python/CHANGELOG.md has its section),
-# builds once, publishes those exact files through trusted publishing (OIDC,
-# environment "pypi"), and creates a GitHub Release whose notes are that
-# changelog section. workflow_dispatch stays as a fallback that builds and
+# builds once, checks and publishes those exact files through trusted
+# publishing (OIDC, environment "pypi"), and creates a GitHub Release whose
+# notes are that changelog section. workflow_dispatch stays as a fallback that builds and
 # publishes without a tag; it skips the preflight and the GitHub Release.
 #
 # The publish step uses pypa/gh-action-pypi-publish because it generates PEP
 # 740 attestations; `uv publish` uploads attestations but does not create them.
+#
+# Releases up to 0.0.11 were tagged v<version>, before a second SDK shared this
+# repository. Those tags stay as history; nothing triggers on them now.
 name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["python-v*"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  UV_VERSION: "0.11.14"
+  UV_VERSION: "0.13.4"
 
 jobs:
   checks:
@@ -38,11 +41,19 @@ jobs:
         if: github.ref_type == 'tag'
         run: |
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("python/pyproject.toml", "rb"))["project"]["version"])')
-          bash .github/scripts/release-preflight.sh python v "$version" > "$RUNNER_TEMP/release-notes.md"
+          bash .github/scripts/release-preflight.sh python python-v "$version" > "$RUNNER_TEMP/release-notes.md"
       - name: Install uv
         run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
       - run: uv build
         working-directory: python
+      - name: Check the exact files to publish
+        working-directory: python
+        run: |
+          uvx 'twine==7.0.0' check --strict dist/*
+          uvx 'check-wheel-contents==0.6.3' dist/*.whl
+      - name: Record the SHA-256 of each file
+        working-directory: python
+        run: sha256sum dist/* | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist

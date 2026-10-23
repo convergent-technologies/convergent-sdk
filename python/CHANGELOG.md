@@ -1,163 +1,61 @@
-# Changelog
-
-Each released version has a `## <version>` section here, and the release
-workflow publishes that section as the GitHub Release notes. The newest
-section may describe a version whose tag does not exist yet.
+What changed in each version of `convergent-sdk`, newest first. The top
+section can describe a version that is not on PyPI yet.
 
 ## 0.0.11
 
-- `model=` records the model as `gen_ai.request.model` on every operation.
-  Agent runs now send `gen_ai.request.model` instead of
-  `convergent.agent.model`. Convergent still reads the old key, so spans from
-  0.0.10 and older keep working, and an agent run keeps the same agent version
-  across the upgrade. On a model call Convergent reads it as the requested
-  model. Earlier versions dropped `model=` outside an agent run and logged
-  that it describes an agent run.
+- `model=` records the model on any span, not only agent runs.
+- Agent runs send the model as `gen_ai.request.model`, not `convergent.agent.model`.
+- Works with OpenTelemetry 1.45.1, which fixes CVE-2026-114603.
+- With OpenTelemetry 1.45.1, timed-out and HTTP 429 exports retry within the same flush timeout.
 
 ## 0.0.10
 
-- `input_artifact()` and `output_artifact()` on a span record a file the span
-  read or produced, from a local path or bytes. The SDK copies and hashes the
-  file when you call, lists it on the span by its `sha256:` digest, and uploads
-  the copy in the background after the span ends and passes the span filters.
-  `origin=` says who supplied the file: `user`, `agent`, `model`, `tool`, or
-  `external`. A file your workspace already holds is not sent again, even from
-  a new process. Any file is sent. Without `media_type=`, a file goes as
-  `application/octet-stream`. Uploads are zstd-compressed, except images and
-  archives that are already compressed, so the SDK now depends on `zstandard`.
-  See
-  [the API reference](docs/reference/api.md#spanhandle).
-- `flush()` takes `uploads=True` to wait for those uploads, up to
-  `upload_timeout_ms`. `FlushResult` reports `pending_uploads` and
-  `dropped_uploads`, and with `uploads=True`, `ok` is false while any file is
-  still pending or was dropped.
-- When the upload route says file uploads are off for your organization, the
-  SDK pauses them for 10 minutes and asks again, so turning them on needs no
-  restart. A bare 404 drops only that file. Uploads send
-  `User-Agent: convergent-sdk-python/<version>`.
+- Attach files to a span with `input_artifact()` and `output_artifact()` ([guide](https://github.com/convergent-technologies/convergent-sdk/blob/main/docs/attach-files.md)).
+- `flush(uploads=True)` waits for attached files to finish uploading.
+- New dependency: `zstandard`.
 
 ## 0.0.9
 
-- Spans upload with `opentelemetry-exporter-otlp-proto-http` 1.45 and later.
-  Earlier SDK versions installed with that exporter sent nothing and logged
-  `'AuthRejectingSession' object has no attribute 'request'` on every batch.
-- `agent()` accepts `model`, `system_instructions`, and `tools` to record the
-  agent's configuration on its run span. `span()` and `observe()` accept the
-  same arguments for `agent_run` and `invoke_agent` operations.
-- `session(session_id)` scopes `convergent.session.id` across SDK and library
-  spans in one process. Nested scopes restore the outer id, and asyncio tasks
-  inherit it while the session block is open. A span's existing string-valued
-  id wins. Surrounding whitespace is removed and invalid values are logged without interrupting
-  the application. The id is not added to OpenTelemetry baggage.
-- `session.id` and `gen_ai.conversation.id` are recorded as set. Earlier
-  versions replaced `session.id` with `gen_ai.conversation.id` and added
-  `convergent.session.id`. Ingest reads every spelling.
-- `context_attributes` and `set_context_attributes()` reject the session keys
-  `convergent.session.id`, `gen_ai.conversation.id`, and `session.id`.
-  Rename the context key and its matching require or reject filter together,
-  then use `session()` for grouping. This is a patch-release compatibility
-  exception; see [Upgrading from 0.0.8](docs/stability.md#upgrading-from-008).
-- Bundled coding-agent skills work without the Convergent CLI or hosted login.
-  The recording reader recognizes session IDs and reports release fields
-  separately from producer-supplied agent versions.
-- A [sessions example](examples/sessions/) records two concurrent conversations
-  with two turns each and both SDK and OpenTelemetry child spans.
+- Works with `opentelemetry-exporter-otlp-proto-http` 1.45 and later.
+- Record an agent's model, instructions, and tools with `agent()`.
+- Group the turns of one conversation with `session(session_id)`.
+- Bundled coding-agent skills work without the Convergent CLI.
+- Breaking: use `session()`, not `context_attributes`, for session ids ([upgrade](https://github.com/convergent-technologies/convergent-sdk/blob/main/python/docs/stability.md#upgrading-from-008)).
+- Breaking: `session.id` is no longer renamed or copied to `convergent.session.id`.
 
 ## 0.0.8
 
-- `context_attributes=` on `agent()`, `tool()`, and `observe()` also takes a
-  callable. The SDK calls it on every call, with the decorated function's
-  arguments bound to their parameter names, so a per-request value such as a
-  customer id can tag the run. When the callable raises or returns something
-  that is not a mapping, the SDK logs once, records the span for your own
-  destinations, and withholds it when `require_span_attributes=` or
-  `reject_span_attributes=` is configured. An untagged span must not slip past
-  a filter.
-- `set_context_attributes(pairs)` on the span handle marks the running span
-  and every span started after the call inside it. Use it for a value you only
-  know mid-request. The handle must be on a span the SDK opened. On any other
-  span the call is refused and logged.
+- Tag a run with a per-request value by passing a function to `context_attributes=`.
+- Tag a running span mid-request with `set_context_attributes()`.
 
 ## 0.0.7
 
-- Every span now inherits its parent span's `context_attributes=` pairs. A
-  span that starts on another thread, or from a context saved earlier, still
-  carries the run's attributes. `require_span_attributes=` keeps a whole run
-  and `reject_span_attributes=` withholds a whole run, library spans included.
-- A span's own `context_attributes=` adds pairs and wins for a key both hold.
-  Its descendants follow the override.
-- The warning for a failed deployment registration now names the endpoint it
-  called.
+- Spans started on another thread keep the run's `context_attributes`.
 
 ## 0.0.6
 
-- `Status` echoes the running filter policy in `require_span_attributes` and
-  `reject_span_attributes`, normalized to attribute name → value list. The
-  printed `check()` report shows the policy as one `filters` row, reject
-  first. A wrong filter no longer hides behind `round trip ok`.
+- `check()` shows the span filters in effect.
 
 ## 0.0.5
 
-- `init(require_span_attributes=)` and `init(reject_span_attributes=)` filter
-  what is sent by attribute value: a span goes to the destinations the SDK set
-  up, Convergent and any `File` or `Console` alike, only when no
-  `reject_span_attributes=` pair matches and every `require_span_attributes=`
-  key holds one of its listed values. The filter reads each key from the
-  stamped `convergent.attributes.<key>` mark first, then from the finished
-  span's own attributes, then from the resource attributes. Under
-  `require_span_attributes=`, a span that holds the key in no source is not
-  sent; under `reject_span_attributes=` alone, it is. Matching is exact by
-  type and case. A pair named in both directions logs an ERROR at startup, and
-  `reject_span_attributes=` wins at runtime. `otel.install()` and
-  `ConvergentSpanProcessor` take the same arguments and apply the same filter.
-  `CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` and `CONVERGENT_REJECT_SPAN_ATTRIBUTES`
-  fill the two in from the environment, JSON-encoded, when the arguments are
-  absent.
-- `span()`, `observe()`, `agent()`, and `tool()` take `context_attributes=`,
-  the per-request marking channel: the pairs land on that span and on every
-  span started inside it, library spans included, as
-  `convergent.attributes.<key>`, and stay in the process. Nothing is written
-  to outbound requests. A mark overwrites no span attribute; a key named in
-  both parameters keeps both values, and the filter reads the mark first. Each
-  service marks and filters its own requests; automatic propagation across
-  services is a planned follow-up.
-
-## 0.0.5
-
-Finalizes 0.0.5b1. The package's behavior is unchanged from 0.0.4; this
-release carries the repository around it forward:
-
-- The instrument and verify agent skills replace the Claude Code plugin. The
-  skills live under `skills/` and cover the same instrument-then-verify loop
-  the plugin ran.
-- A litellm integration guide (`python/docs/integrations/litellm.md`) for
-  litellm's OpenTelemetry callback, and attribute reference updates to match.
-- Security reports go through GitHub's private vulnerability reporting form
-  first (`SECURITY.md`); email stays as the alternative.
-- Releases are cut by tag: pushing `v<version>` runs CI, checks the tag
-  against `pyproject.toml`, publishes to PyPI with PEP 740 attestations, and
-  posts the GitHub Release from this file.
+- Choose which spans are sent with `require_span_attributes=` and `reject_span_attributes=`.
+- Tag a span and everything inside it with `context_attributes=`.
+- Instrument and verify skills for coding agents.
+- A LiteLLM integration guide.
 
 ## 0.0.5b1
 
-A pre-release. The package is unchanged from 0.0.4. The version moves so the
-repository's instrument skill and plugin can be tested against a published
-wheel without disturbing the release people install by default. A plain
-`pip install convergent-sdk` still resolves to 0.0.4; `pip install
-convergent-sdk==0.0.5b1` or `--pre` installs this one.
+- Pre-release for testing. No changes from 0.0.4.
 
 ## 0.0.4
 
-- `flush()` reports batches the collector refused as unauthorized: the refused
-  batch and every batch withheld after it turn `ok` off and count in `dropped`.
-  They were previously reported as delivered.
-- `convergent.__version__` reports the installed package's version.
+- `flush()` reports batches the server refused as dropped.
+- `convergent.__version__` reports the installed version.
 
 ## 0.0.3
 
-The first public release of the tracing SDK, tagged `v0.0.3` on this
-repository.
+- First public release.
 
 ## 0.0.2
 
-An early packaging cut, superseded by 0.0.3. It has no tag here.
+- Early packaging release, replaced by 0.0.3.

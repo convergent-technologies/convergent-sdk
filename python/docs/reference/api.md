@@ -103,69 +103,10 @@ right away.
 
 #### Span filters
 
-`require_span_attributes` and `reject_span_attributes` filter by attribute
-value:
-
-- A key takes one value or a list. Listed values combine with OR.
-- `require_span_attributes` keys combine with AND.
-  `reject_span_attributes` keys combine with OR.
-- Reject decides first. A pair named in both mappings is withheld, and
-  `init()` logs an ERROR for it at startup.
-- The [environment variables](#environment-variables) hold the same mappings
-  as JSON, e.g. `'{"customer.id": "acme"}'`, and fill the arguments in when
-  they are absent.
-
-A key can come from three places, read in this order:
-
-1. [`context_attributes=`](#span) on `span()` or a decorator. The SDK
-   stamps each pair onto that span and every span started inside it, as
-   `convergent.attributes.<key>`. The pairs stay in the process. Nothing
-   writes them to outbound requests.
-2. The span's own attributes, read when the span ends.
-3. Resource attributes, including `OTEL_RESOURCE_ATTRIBUTES`, read once per
-   process.
-
-The filters apply only to the destinations the SDK set up. Your own exporters
-receive every span, including the stamp.
-
-Context attributes across threads and processes:
-
-- Set the filters once, in `init()`. They judge every span in the process.
-- Every span inherits its parent span's stamped context attributes, whatever
-  thread or context it starts on. A library that parents its spans to your
-  run inherits the run's attributes this way.
-- A span's own `context_attributes=` adds pairs and wins for a key both hold.
-  Its descendants follow the override.
-- A span with no in-process parent inherits nothing. When your own code
-  starts rootless spans on another thread, open a `span()` with
-  `context_attributes=` there, or use a threading instrumentor.
-  OpenTelemetry's `ThreadingInstrumentor` is one.
-- A separate process inherits nothing. Configure the SDK and the filters in
-  each process.
-
-The matching rules:
-
-- Comparison is exact, by type and case. `1` matches neither `"1"` nor
-  `True`. `"Acme"` does not match `"acme"`.
-- The filter decides each span alone. A kept parent does not keep its
-  children. To keep or exclude a whole run, hold the key with
-  `context_attributes=`. A bare attribute on the run span covers that one
-  span only.
-- An unmarked span never passes `require_span_attributes`. Under
-  `reject_span_attributes` alone, an unmarked span is sent.
-- A list-valued or enum-valued span attribute never matches.
-  `reject_span_attributes` cannot exclude it. `require_span_attributes`
-  withholds it.
-- `require_span_attributes={"customer.id": []}` sends no span at all.
-  `reject_span_attributes={"customer.id": []}` withholds nothing.
-- Past the attribute limit, OpenTelemetry evicts the span's oldest attribute.
-  A span that loses a stamped key that way is withheld under
-  `require_span_attributes`.
-- The filters and `agents` combine. A span is sent only when every configured
-  filter keeps it.
-- The filters cover one process. Set the mark and the filters in each
-  service. Nothing about them travels between processes. A service with no
-  filters sends everything it records.
+`require_span_attributes` and `reject_span_attributes` choose which spans are
+sent by attribute value, and `agents` by agent name. The
+[span filters guide](../../../docs/span-filters.md) has the rules, the
+environment variables, and how `context_attributes=` marks a request.
 
 ### Status
 
@@ -341,7 +282,7 @@ input and output inside the decorated function, use
   do not run its tools. `tools` accepts a sequence of JSON-safe mappings,
   including OpenAI-style `{"type": "function", "function": {...}}` definitions and
   Anthropic-style `{"name": ..., "input_schema": ...}` definitions.
-  See [agent configuration attributes](attributes.md#operation-and-identity)
+  See [agent configuration attributes](../../../docs/attributes.md#operation-and-identity)
   for the recorded keys and their precedence.
 
 A generator's span covers the whole iteration. Abandoning a generator early is
@@ -499,7 +440,7 @@ The emitted operations `invoke_agent`, `chat`, and `execute_tool` identify
 agent, model, and tool spans. `text_completion` and `generate_content` also
 identify model spans. Other operations keep their text and record generic
 spans. For example, `operation="toolcall"` stays `toolcall` and does not
-become a tool call. See [span kinds](attributes.md#fields-kept-for-each-span-kind)
+become a tool call. See [span kinds](../../../docs/attributes.md#fields-kept-for-each-span-kind)
 for the fields each kind keeps.
 
 An `agent_run` also writes `gen_ai.agent.name`, and `gen_ai.agent.version` when

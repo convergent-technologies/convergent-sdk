@@ -44,22 +44,9 @@ The SDK sends spans over OTLP/HTTP, so it installs the HTTP exporter package.
 `CONVERGENT_API_KEY`, `CONVERGENT_ENDPOINT`, and `CONVERGENT_RELEASE` are
 fallbacks for the `init()` arguments of the same name. The argument wins.
 
-`CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` and `CONVERGENT_REJECT_SPAN_ATTRIBUTES`
-fill `require_span_attributes` and `reject_span_attributes` the same way. Each
-holds the mapping as JSON, e.g. `'{"customer.id": "acme"}'`. A value that is
-not JSON is rejected like a malformed argument. The variable configures the
-filter but does not mark any span. A span passes
-`CONVERGENT_REQUIRE_SPAN_ATTRIBUTES` only when a `context_attributes=` mark,
-the span's own attribute, or a resource attribute holds the key. See
-[Mark the agent run](reference/api.md#agent).
-
-Only `init()` reads `CONVERGENT_SPANS_DIR`. `otel.install()` takes no
-destinations. The variable adds a file destination next to any `destinations`
-argument. If you set both, the SDK writes the kept spans to two files and logs
-one warning.
-
-`CONVERGENT_TRACES_EXPORTER=console` adds a destination and keeps the others,
-so you can read what you send while still sending it.
+The span filter variables and the local destination variables are described
+in [Span filters](../../docs/span-filters.md) and
+[Write spans to a file or the console](../../docs/local-files.md).
 
 `CONVERGENT_DEBUG` combines with the `debug` argument. Either one turns on debug
 logging, so the variable enables it even when the code passes `debug=False`.
@@ -119,19 +106,9 @@ corrected `init()` call afterwards works.
 
 ## Destinations
 
-`api_key` sends to Convergent. `destinations` adds more places. Every span that
-the `agents`, `require_span_attributes`, and `reject_span_attributes` filters
-keep goes to all of them.
-
-```python
-convergent.init(release="1.4.0", destinations=[convergent.File("/data/traces"), convergent.Console()])
-```
-
-A `File` destination writes the kept spans to disk instead of the network and
-needs no credentials. Use it where the process cannot reach the receiver, such
-as a locked-down container or a CI job. Two `File` values naming the same file
-collapse into one destination. Two `File` values naming different files stay
-separate, and one warning says that every span is written twice.
+`api_key` sends to Convergent. `destinations` adds more places, and every span
+the filters keep goes to all of them. [Write spans to a file or the
+console](../../docs/local-files.md) covers `File` and `Console`.
 
 `File` and `Console` are the only destinations. `init()` rejects anything else
 in `destinations`, such as a raw OpenTelemetry `SpanProcessor`. To add your own
