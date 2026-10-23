@@ -1,132 +1,37 @@
 # convergent-sdk
 
-Records the runs of your Python AI agents as OpenTelemetry spans and sends them to your
-Convergent workspace.
+The Convergent SDKs for Python and TypeScript. They record the runs of your AI
+agents as OpenTelemetry spans and send them to your Convergent workspace.
 
-## Install
+## Start
 
-```bash
-pip install convergent-sdk
-```
+| Language | Install | Start here |
+| --- | --- | --- |
+| Python | `pip install convergent-sdk` | [python/docs/index.md](python/docs/index.md) |
+| TypeScript | `npm install convergent-sdk @opentelemetry/api` | [typescript/docs/index.md](typescript/docs/index.md) |
 
-## Set your key and release
+To let a coding agent such as Claude Code or Codex instrument your agent, give
+it the prompt in [Instrument with a coding agent](docs/coding-agent.md).
 
-Mint an ingestion key at
-[app.convergent.dev/workspace/settings](https://app.convergent.dev/workspace/settings).
+## Where things are
 
-```bash
-export CONVERGENT_API_KEY="cvk_xxxxxxxxxxxxxxxx"
+| Folder | Holds |
+| --- | --- |
+| `docs/` | Guides for both languages: [recording by hand](docs/record-by-hand.md), [files](docs/attach-files.md), [span filters](docs/span-filters.md), [local files](docs/local-files.md), [attributes](docs/attributes.md), and [troubleshooting](docs/troubleshooting.md) |
+| `python/docs/`, `typescript/docs/` | Each language's install, configuration, API reference, and OpenTelemetry pages |
+| `skills/` | The `convergent-instrument` and `convergent-verify` skills for coding agents |
+| `python/`, `typescript/` | The SDK source, tests, examples, and changelog |
 
-export GIT_SHA=$(git rev-parse --short HEAD)
-```
+[llms.txt](llms.txt) lists every docs file and says when to read it. The docs
+folders are the source of truth for how the SDKs work. The
+[Convergent docs site](https://app.convergent.dev/docs) shows the same files.
+The skills hold only the steps a coding agent follows. For every SDK detail,
+they send the agent to these docs, at the release tag of the installed SDK.
 
-`CONVERGENT_API_KEY` is required for network export. A local `File(...)`
-destination needs no API key. Store ingestion keys in your deployment's secret settings.
+## Releases
 
-`GIT_SHA` is an example variable read by `init(release=...)` below. A release is
-required; use a Git SHA, build ID, or immutable image tag. You can also set it
-with `CONVERGENT_RELEASE`.
+Python releases are tagged `python-v<version>` (`v<version>` up to 0.0.11).
+TypeScript releases are tagged `typescript-v<version>`. Each language's
+`CHANGELOG.md` lists the changes.
 
-The `session()` helper requires SDK 0.0.9 or newer. Read the
-[0.0.8 upgrade guide](python/docs/stability.md#upgrading-from-008) before upgrading.
-
-## Instrument with a coding agent
-
-If you're instrumenting Convergent for the first time, the fastest way to do so is give your coding agent this prompt.
-
-```text
-Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
-
-convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given the agent file or directory to instrument, as well as the instructions or command that runs the agent for the representative run. Use both skills to instrument and verify your agent. Continue using both skills until the recording has no unresolved instrumentation issue.
-
-Agent to instrument: <file or directory>
-Representative run: <command or instructions that run the agent>
-```
-
-If you've already instrumented with Convergent, and are just looking to verify your setup, give your coding agent this prompt:
-
-```text
-Install the convergent-instrument and convergent-verify skills from the github repository convergent-technologies/convergent-sdk.
-
-convergent-instrument is a skill to instrument your agent, and convergent-verify is a skill to inspect each recording. You will be given the agent file or directory that is already instrumented, as well as the instructions or command that runs the agent for the representative run. Use both skills to verify the existing instrumentation, and fix each evidence-backed instrumentation issue. Rerun and verify until the recording has no unresolved instrumentation issue.
-
-Agent to verify: <file or directory that is already instrumented>
-Representative run: <command or instructions that run the agent>
-```
-
-Alternatively, you can also install the skills directly in your coding agent using:
-
-```bash
-npx skills add convergent-technologies/convergent-sdk
-```
-
-You'll have to restart your coding agent session to use the skills directly, but can do so with slash commands:
-
-```
-/convergent-instrument
-/convergent-verify
-```
-
-## Example: Trace a run
-
-Call `init()` once at startup, and put `agent()` on the function that handles one request.
-The model call inside it is the one your app already makes, and this one is the OpenAI
-client. Save it as `app.py`.
-
-```python
-import os
-
-from openai import OpenAI
-
-import convergent
-
-convergent.init(release=os.environ["GIT_SHA"])
-
-client = OpenAI()
-MODEL = "gpt-5.5"
-
-
-@convergent.agent(name="support-agent")
-def answer(question: str) -> str:
-    with convergent.span(name=MODEL, operation="model_call") as call:
-        call.set_input({"question": question})
-        completion = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": question}],
-        )
-        reply = completion.choices[0].message.content
-        call.set_output({"answer": reply})
-        call.set_attribute("gen_ai.request.model", MODEL)
-        call.set_attribute("gen_ai.usage.input_tokens", completion.usage.prompt_tokens)
-        call.set_attribute("gen_ai.usage.output_tokens", completion.usage.completion_tokens)
-    return reply
-
-
-print(answer("Where is my invoice?"))
-convergent.flush()
-```
-
-From your command line, run:
-```bash
-pip install openai
-export OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
-export GIT_SHA=$(git rev-parse --short HEAD)
-python app.py
-```
-
-That records one agent run with one model call inside it, carrying the prompt, the answer,
-the model, and the token counts. Any other model client goes in the same place, and the
-trace keeps the same shape.
-
-## Full Documentation
-The full documentation is under `python/docs/`: confirming a run arrived with `check()`,
-instrumenting your agent by hand, attaching to an existing OpenTelemetry setup, attaching
-files to spans, the integration packages, configuration, the API reference, the attribute
-spellings Convergent reads, and troubleshooting.
-
-`skills/convergent-instrument/` and `skills/convergent-verify/` are the skills from the
-coding-agent section above.
-
-`python/examples/` holds runnable examples: the run above as a self-contained file that
-needs no OpenAI key, and one trace recorded across a dispatcher and three worker
-processes.
+[Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [License](LICENSE)

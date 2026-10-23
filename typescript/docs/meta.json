@@ -1,0 +1,20 @@
+{
+  "title": "TypeScript",
+  "root": true,
+  "pages": [
+    "index",
+    "---Instrumentation---",
+    "coding-agent",
+    "opentelemetry",
+    "attach-files",
+    "span-filters",
+    "local-files",
+    "record-by-hand",
+    "---Reference---",
+    "reference/api",
+    "configuration",
+    "attributes",
+    "troubleshooting",
+    "reference/changelog"
+  ]
+}

@@ -80,9 +80,8 @@ A field missing from the rendered summary may exist in the raw span. Inspect the
 relevant raw attributes and the integration's documented format before reporting
 a missing field. Native GenAI names and supported aliases are listed in the
 [attribute reference](https://app.convergent.dev/docs/sdk/python/reference/attributes).
-Both SDKs use the same attributes, so that page also applies to TypeScript
-recordings. A matching public SDK checkout's `python/docs/reference/attributes.md`
-also works.
+Both SDKs use the same attributes. A matching public SDK checkout's
+`docs/attributes.md` also works.
 
 Convergent uses `convergent.session.id` first and falls back to
 `gen_ai.conversation.id`, then `session.id`. Compare the raw fields without

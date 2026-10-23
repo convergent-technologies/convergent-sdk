@@ -6,9 +6,8 @@
 # section). It then packs the package once, publishes that tarball through npm
 # trusted publishing (OIDC, environment "npm"), and creates a GitHub Release
 # whose notes are that changelog section. The preflight runs before the
-# publish, so a mismatch publishes nothing. Python releases use v* tags in
-# release.yml. A tag filter matches from the start of the tag name, so v* does
-# not match typescript-v*.
+# publish, so a mismatch publishes nothing. Python releases use python-v* tags
+# in release.yml.
 #
 # To release, land a commit on main that bumps the version in
 # typescript/package.json and adds its section to typescript/CHANGELOG.md,

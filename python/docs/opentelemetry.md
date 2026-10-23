@@ -50,7 +50,7 @@ with convergent.span(
 ```
 
 This sends only the spans for customer `acme`. Set the filters in each process.
-They do not travel between processes. See [Span filters](reference/api.md#span-filters)
+They do not travel between processes. See [Span filters](../../docs/span-filters.md)
 for the full rules.
 
 ## Pass the provider yourself

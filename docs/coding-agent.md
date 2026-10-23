@@ -36,6 +36,15 @@ The coding agent installs the skills into `.claude/skills` (Claude Code) or
 It asks you when it needs credentials or permission. It stops when a problem
 outside instrumentation blocks it.
 
+You can also install the skills yourself:
+
+```bash
+npx skills add convergent-technologies/convergent-sdk
+```
+
+Restart your coding agent session, then run them with `/convergent-instrument`
+and `/convergent-verify`.
+
 ## Check your instrumentation
 
 After you change your agent, or if you added instrumentation yourself, ask a

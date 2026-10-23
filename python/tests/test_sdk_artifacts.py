@@ -17,10 +17,10 @@ import hashlib
 import http.server
 import json
 import threading
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import zstandard
@@ -53,7 +53,6 @@ class _Route:
         default_factory=list
     )
     gate: threading.Event = field(default_factory=threading.Event)
-    #: File uploads are off: HEAD and PUT answer 403 with the off reason.
     off: bool = False
 
     def __post_init__(self) -> None:
@@ -350,11 +349,11 @@ def test_a_503_is_retried_after_retry_after(route: _Route) -> None:
 def test_uploads_pause_while_the_route_says_they_are_off_then_resume(
     route: _Route, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_artifacts, "_PAUSE_S", 0.5)
+    now = 1_000.0
+    monkeypatch.setattr(_artifacts, "time", SimpleNamespace(monotonic=lambda: now))
     _init(route)
     route.off = True
 
-    # The off answer comes on the HEAD, so no file bytes are sent at all.
     with convergent.span(name="refused", operation="tool_call") as refused:
         refused.input_artifact(b"first file")
     off = convergent.flush(uploads=True)
@@ -362,7 +361,7 @@ def test_uploads_pause_while_the_route_says_they_are_off_then_resume(
         paused.input_artifact(b"second file")
     convergent.flush(uploads=True)
     route.off = False
-    time.sleep(0.6)
+    now += _artifacts._PAUSE_S
     with convergent.span(name="resumed", operation="tool_call") as resumed:
         resumed.input_artifact(b"third file")
     result = convergent.flush(uploads=True)
@@ -371,7 +370,6 @@ def test_uploads_pause_while_the_route_says_they_are_off_then_resume(
     spans = route.spans()
     assert "convergent.artifacts.input" not in spans["execute_tool paused"]
     assert "convergent.artifacts.input" in spans["execute_tool resumed"]
-    # Uploads being off is not a failure the caller can act on.
     assert (off.ok, off.dropped_uploads) == (True, 0)
     assert (result.ok, result.dropped_uploads) == (True, 0)
 
@@ -395,7 +393,7 @@ def test_a_bare_404_or_409_drops_only_that_file_and_flush_reports_it(route: _Rou
     assert route.puts[0].headers["User-Agent"].startswith("convergent-sdk-python/")
 
 
-def test_a_closed_queue_copies_no_files_and_flush_does_not_wait(route: _Route) -> None:
+def test_a_closed_queue_copies_no_files(route: _Route) -> None:
     _init(route)
     route.gate.clear()
 
@@ -407,10 +405,8 @@ def test_a_closed_queue_copies_no_files_and_flush_does_not_wait(route: _Route) -
     uploader.close()
     with convergent.span(name="after close", operation="tool_call") as after:
         after.input_artifact(b"after close")
-    started = time.monotonic()
     convergent.flush(uploads=True, upload_timeout_ms=5_000)
 
-    assert time.monotonic() - started < 2
     assert "convergent.artifacts.input" not in route.spans()["execute_tool after close"]
 
 

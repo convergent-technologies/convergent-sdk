@@ -1,0 +1,39 @@
+# convergent-sdk
+
+> The Convergent SDKs for Python and TypeScript record the runs of AI agents as OpenTelemetry spans and send them to a Convergent workspace.
+
+Each path below is a file in the public repository `convergent-technologies/convergent-sdk`. Read each file at the release tag of the installed SDK, so the docs match the code: `https://raw.githubusercontent.com/convergent-technologies/convergent-sdk/<tag>/<path>`. Python tags are `python-v<version>`, or `v<version>` for releases up to 0.0.11. TypeScript tags are `typescript-v<version>`. For example, the attach-files page for TypeScript 0.1.1 is `https://raw.githubusercontent.com/convergent-technologies/convergent-sdk/typescript-v0.1.1/docs/attach-files.md`. If the tag does not have a file, read it from `main`, and check each signature against the installed code.
+
+## Python
+
+- [Install and first run](python/docs/index.md): read before you install or configure the SDK.
+- [Configuration](python/docs/configuration.md): read before you set the API key, the endpoint, the release, or any other setting.
+- [API reference](python/docs/reference/api.md): read before you add or change a span. It gives every function and argument.
+- [OpenTelemetry](python/docs/opentelemetry.md): read before you touch an existing tracer provider, instrumentor, or exporter.
+- [Integrations](python/docs/integrations/index.md): read before you add a span by hand. An integration that covers the model client records the model spans for you.
+- [Pydantic AI](python/docs/integrations/pydantic-ai.md): read when the agent uses Pydantic AI.
+- [LiteLLM](python/docs/integrations/litellm.md): read when the agent uses LiteLLM.
+- [LangChain](python/docs/integrations/langchain.md): read when the agent uses LangChain.
+- [Versions and upgrades](python/docs/stability.md): read before you change the SDK version.
+
+## TypeScript
+
+- [Install and first run](typescript/docs/index.md): read before you install or configure the SDK.
+- [Configuration](typescript/docs/configuration.md): read before you set the API key, the endpoint, the release, or any other setting.
+- [API reference](typescript/docs/reference/api.md): read before you add or change a span. It gives every function and argument.
+- [OpenTelemetry](typescript/docs/opentelemetry.md): read before you touch an existing OpenTelemetry setup, when the agent uses Mastra, or when the application owns the tracer provider.
+
+## Both languages
+
+- [Record by hand](docs/record-by-hand.md): read before you add agent, model, or tool spans by hand. It gives the top agent span, agent outputs, the message format, and token usage.
+- [Attach files](docs/attach-files.md): read before you record a file. It says which span records each kind of file.
+- [Span filters](docs/span-filters.md): read before you add a filter that keeps or withholds requests.
+- [Local files](docs/local-files.md): read before you record to a local file.
+- [Attributes](docs/attributes.md): read to check the field names in a recording.
+- [Troubleshooting](docs/troubleshooting.md): read when a recording is missing or incomplete.
+- [Instrument with a coding agent](docs/coding-agent.md): the prompt and the skills for Claude Code, Codex, and other coding agents.
+
+## Optional
+
+- [Python changelog](python/CHANGELOG.md): the changes in each Python release.
+- [TypeScript changelog](typescript/CHANGELOG.md): the changes in each TypeScript release.
