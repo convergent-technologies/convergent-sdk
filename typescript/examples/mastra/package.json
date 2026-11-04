@@ -18,6 +18,6 @@
     "@opentelemetry/api": "1.9.1",
     "@opentelemetry/exporter-trace-otlp-proto": "0.218.0",
     "convergent-sdk": "link:../..",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   }
 }
