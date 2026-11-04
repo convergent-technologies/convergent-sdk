@@ -10,16 +10,16 @@ importers:
     dependencies:
       '@mastra/core':
         specifier: 1.74.0
-        version: 1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5)
+        version: 1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6)
       '@mastra/observability':
         specifier: 1.18.3
-        version: 1.18.3(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5))(zod@4.6.5)
+        version: 1.18.3(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6))(zod@4.6.6)
       '@mastra/otel-bridge':
         specifier: 1.5.13
-        version: 1.5.13(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5))(zod@4.6.5)
+        version: 1.5.13(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6))(zod@4.6.6)
       '@mastra/otel-exporter':
         specifier: 1.4.4
-        version: 1.4.4(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5))(zod@4.6.5)
+        version: 1.4.4(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6))(zod@4.6.6)
       '@opentelemetry/api':
         specifier: 1.9.1
         version: 1.9.1
@@ -30,8 +30,8 @@ importers:
         specifier: link:../..
         version: link:../..
       zod:
-        specifier: 4.6.5
-        version: 4.6.5
+        specifier: 4.6.6
+        version: 4.6.6
 
 packages:
 
@@ -320,18 +320,21 @@ packages:
   '@opentelemetry/sdk-trace-base@2.11.0':
     resolution: {integrity: sha512-H19x/TX/LZdqiYOjM7fqtSxwlplC5pgelavqbQdHbhdq0q/AI/TGkM2dfGuuynTXmJPeF2HoZVoPDu+TGoW78A==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
   '@opentelemetry/sdk-trace-base@2.7.1':
     resolution: {integrity: sha512-NAYIlsF8MPUsKqJMiDQJTMPOmlbawC1Iz/omMLygZ1C9am8fTKYjTaI+OZM+WTY3t3Glo0wnOg/6/pac6RGPPw==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.3.0 <1.10.0'
 
   '@opentelemetry/sdk-trace-node@2.11.0':
     resolution: {integrity: sha512-CuvCMJmZxswhNLlM2LfuLOW3h3fZujA4hsG4B+Sz4dX2zvaXO8Ng74cnDHWD64gLszTlhiG3c0iNUjj4g+0/sA==}
     engines: {node: ^18.19.0 || >=20.6.0}
+    deprecated: Use @opentelemetry/sdk-trace package
     peerDependencies:
       '@opentelemetry/api': '>=1.0.0 <1.10.0'
 
@@ -349,6 +352,10 @@ packages:
 
   '@opentelemetry/semantic-conventions@1.43.0':
     resolution: {integrity: sha512-eSYWTm620tTk45EKSedaUL8MFYI8hW164hIXsgIHyxu3VobUB3fFCu5t0hQby6OoWRPsG1KkKUG2M5UadiLiVg==}
+    engines: {node: '>=14'}
+
+  '@opentelemetry/semantic-conventions@1.44.0':
+    resolution: {integrity: sha512-E3JkOlMBi3N8OGGkbl7tFyqk2MAS6/lySRZBK3Mu7AzjF1fT8oIChH9ChE48SUWzDn9Kdwta+G/p5LJ4xW4CLQ==}
     engines: {node: '>=14'}
 
   '@posthog/core@1.56.0':
@@ -466,8 +473,8 @@ packages:
   '@types/ms@2.1.0':
     resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
 
-  '@types/node@26.6.4':
-    resolution: {integrity: sha512-ldVPDCzj7fsaGZrLB0NuHuTvJcsNasysBAqMolr/cgxrLd1xbqxIr3XJiPnHHJUCxj5sNF1vnRj9aWnrVh5Jcg==}
+  '@types/node@26.6.6':
+    resolution: {integrity: sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog==}
 
   '@types/unist@3.0.3':
     resolution: {integrity: sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q==}
@@ -649,8 +656,8 @@ packages:
   isexe@2.0.0:
     resolution: {integrity: sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw==}
 
-  jose@6.2.12:
-    resolution: {integrity: sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw==}
+  jose@6.2.15:
+    resolution: {integrity: sha512-qdF6ewcZARtef63fJ9AKKZPgxw+t7USH6HLXYcD4CrdmSvDp79rpJSPFEKc90QBeGS63u1KQtN2MZQHC0yDIzA==}
 
   jpeg-js@0.4.4:
     resolution: {integrity: sha512-WZzeDOEtTOBK4Mdsar0IqEU5sMr3vSV2RqkAIzUEV2BHnUfKGyswWFPFwK5EeDo93K3FohSHbLAjj0s1Wzd+dg==}
@@ -997,8 +1004,8 @@ packages:
   zod-from-json-schema@0.5.6:
     resolution: {integrity: sha512-U33AJ7ZWS6y9XNSzMWcdy8hRAvZmWhTtpYJu0SXPT5AArbc9nq2ur7Magzmn5RF9KBV4b3FP0nCpmqqlfXlR9w==}
 
-  zod@4.6.5:
-    resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
+  zod@4.6.6:
+    resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
@@ -1013,25 +1020,25 @@ snapshots:
 
   '@a2a-js/sdk@1.0.1(@grpc/grpc-js@1.14.5)':
     dependencies:
-      jose: 6.2.12
+      jose: 6.2.15
       uuid: 11.1.1
     optionalDependencies:
       '@grpc/grpc-js': 1.14.5
 
-  '@ai-sdk/provider-utils@4.0.40(zod@4.6.5)':
+  '@ai-sdk/provider-utils@4.0.40(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 3.0.14
       '@standard-schema/spec': 1.1.0
       eventsource-parser: 3.1.1
-      zod: 4.6.5
+      zod: 4.6.6
 
-  '@ai-sdk/provider-utils@5.0.13(zod@4.6.5)':
+  '@ai-sdk/provider-utils@5.0.13(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 4.0.4
       '@standard-schema/spec': 1.1.0
       '@workflow/serde': 4.1.0
       eventsource-parser: 3.1.1
-      zod: 4.6.5
+      zod: 4.6.6
 
   '@ai-sdk/provider@2.0.3':
     dependencies:
@@ -1079,27 +1086,27 @@ snapshots:
     dependencies:
       '@lukeed/csprng': 1.1.0
 
-  '@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5)':
+  '@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6)':
     dependencies:
       '@a2a-js/sdk-v0_3': '@a2a-js/sdk@0.3.14(@grpc/grpc-js@1.14.5)'
       '@a2a-js/sdk-v1': '@a2a-js/sdk@1.0.1(@grpc/grpc-js@1.14.5)'
-      '@ai-sdk/provider-utils-v6': '@ai-sdk/provider-utils@4.0.40(zod@4.6.5)'
-      '@ai-sdk/provider-utils-v7': '@ai-sdk/provider-utils@5.0.13(zod@4.6.5)'
+      '@ai-sdk/provider-utils-v6': '@ai-sdk/provider-utils@4.0.40(zod@4.6.6)'
+      '@ai-sdk/provider-utils-v7': '@ai-sdk/provider-utils@5.0.13(zod@4.6.6)'
       '@ai-sdk/provider-v5': '@ai-sdk/provider@2.0.3'
       '@ai-sdk/provider-v6': '@ai-sdk/provider@3.0.14'
       '@ai-sdk/provider-v7': '@ai-sdk/provider@4.0.17'
       '@isaacs/ttlcache': 2.1.5
       '@lukeed/uuid': 2.0.1
-      '@mastra/schema-compat': 1.3.13(zod@4.6.5)
+      '@mastra/schema-compat': 1.3.13(zod@4.6.6)
       '@standard-schema/spec': 1.1.0
-      chat: 4.41.1(zod@4.6.5)
+      chat: 4.41.1(zod@4.6.6)
       croner: 10.0.1
       dotenv: 17.4.2
       execa: 9.6.1
       fastq: 1.20.3
       gray-matter: 4.0.3
       hono: 4.13.13
-      hono-openapi: 1.3.3(hono@4.13.13)(zod@4.6.5)
+      hono-openapi: 1.3.3(hono@4.13.13)(zod@4.6.6)
       ignore: 7.0.12
       jpeg-js: 0.4.4
       json-schema: 0.4.0
@@ -1111,7 +1118,7 @@ snapshots:
       re2js: 2.8.6
       ws: 8.22.0
       xxhash-wasm: 1.1.0
-      zod: 4.6.5
+      zod: 4.6.6
     transitivePeerDependencies:
       - '@bufbuild/protobuf'
       - '@grpc/grpc-js'
@@ -1131,25 +1138,25 @@ snapshots:
       - zod-openapi
       - zod-to-json-schema
 
-  '@mastra/observability@1.18.3(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5))(zod@4.6.5)':
+  '@mastra/observability@1.18.3(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6))(zod@4.6.6)':
     dependencies:
-      '@mastra/core': 1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5)
-      zod: 4.6.5
+      '@mastra/core': 1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6)
+      zod: 4.6.6
 
-  '@mastra/otel-bridge@1.5.13(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5))(zod@4.6.5)':
+  '@mastra/otel-bridge@1.5.13(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6))(zod@4.6.6)':
     dependencies:
-      '@mastra/core': 1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5)
-      '@mastra/observability': 1.18.3(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5))(zod@4.6.5)
-      '@mastra/otel-exporter': 1.4.4(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5))(zod@4.6.5)
+      '@mastra/core': 1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6)
+      '@mastra/observability': 1.18.3(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6))(zod@4.6.6)
+      '@mastra/otel-exporter': 1.4.4(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6))(zod@4.6.6)
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/api-logs': 0.221.0
     transitivePeerDependencies:
       - zod
 
-  '@mastra/otel-exporter@1.4.4(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5))(zod@4.6.5)':
+  '@mastra/otel-exporter@1.4.4(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6))(zod@4.6.6)':
     dependencies:
-      '@mastra/core': 1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5)
-      '@mastra/observability': 1.18.3(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.5))(zod@4.6.5)
+      '@mastra/core': 1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6)
+      '@mastra/observability': 1.18.3(@mastra/core@1.74.0(@grpc/grpc-js@1.14.5)(zod@4.6.6))(zod@4.6.6)
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/api-logs': 0.221.0
       '@opentelemetry/core': 2.11.0(@opentelemetry/api@1.9.1)
@@ -1170,10 +1177,10 @@ snapshots:
     transitivePeerDependencies:
       - zod
 
-  '@mastra/schema-compat@1.3.13(zod@4.6.5)':
+  '@mastra/schema-compat@1.3.13(zod@4.6.6)':
     dependencies:
       json-schema-to-zod: 2.8.1
-      zod: 4.6.5
+      zod: 4.6.6
       zod-from-json-schema: 0.5.6
 
   '@opentelemetry/api-logs@0.218.0':
@@ -1270,7 +1277,7 @@ snapshots:
       '@opentelemetry/core': 2.11.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/resources': 2.11.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/sdk-trace': 2.11.0(@opentelemetry/api@1.9.1)
-      '@opentelemetry/semantic-conventions': 1.43.0
+      '@opentelemetry/semantic-conventions': 1.44.0
     optional: true
 
   '@opentelemetry/otlp-exporter-base@0.218.0(@opentelemetry/api@1.9.1)':
@@ -1398,9 +1405,11 @@ snapshots:
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/core': 2.11.0(@opentelemetry/api@1.9.1)
       '@opentelemetry/resources': 2.11.0(@opentelemetry/api@1.9.1)
-      '@opentelemetry/semantic-conventions': 1.43.0
+      '@opentelemetry/semantic-conventions': 1.44.0
 
   '@opentelemetry/semantic-conventions@1.43.0': {}
+
+  '@opentelemetry/semantic-conventions@1.44.0': {}
 
   '@posthog/core@1.56.0':
     dependencies:
@@ -1441,21 +1450,21 @@ snapshots:
 
   '@sindresorhus/merge-streams@4.0.0': {}
 
-  '@standard-community/standard-json@0.3.6(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(zod@4.6.5)':
+  '@standard-community/standard-json@0.3.6(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(zod@4.6.6)':
     dependencies:
       '@standard-schema/spec': 1.1.0
       '@types/json-schema': 7.0.15
       quansync: 0.2.11
     optionalDependencies:
-      zod: 4.6.5
+      zod: 4.6.6
 
-  '@standard-community/standard-openapi@0.2.10(@standard-community/standard-json@0.3.6(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(zod@4.6.5))(@standard-schema/spec@1.1.0)(openapi-types@12.1.3)(zod@4.6.5)':
+  '@standard-community/standard-openapi@0.2.10(@standard-community/standard-json@0.3.6(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(zod@4.6.6))(@standard-schema/spec@1.1.0)(openapi-types@12.1.3)(zod@4.6.6)':
     dependencies:
-      '@standard-community/standard-json': 0.3.6(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(zod@4.6.5)
+      '@standard-community/standard-json': 0.3.6(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(zod@4.6.6)
       '@standard-schema/spec': 1.1.0
       openapi-types: 12.1.3
     optionalDependencies:
-      zod: 4.6.5
+      zod: 4.6.6
 
   '@standard-schema/spec@1.1.0': {}
 
@@ -1471,7 +1480,7 @@ snapshots:
 
   '@types/ms@2.1.0': {}
 
-  '@types/node@26.6.4':
+  '@types/node@26.6.6':
     dependencies:
       undici-types: 8.9.0
     optional: true
@@ -1500,7 +1509,7 @@ snapshots:
 
   character-entities@2.0.2: {}
 
-  chat@4.41.1(zod@4.6.5):
+  chat@4.41.1(zod@4.6.6):
     dependencies:
       '@workflow/serde': 4.1.0-beta.2
       mdast-util-to-string: 4.0.0
@@ -1510,7 +1519,7 @@ snapshots:
       remend: 1.4.0
       unified: 11.0.5
     optionalDependencies:
-      zod: 4.6.5
+      zod: 4.6.6
     transitivePeerDependencies:
       - supports-color
 
@@ -1609,11 +1618,11 @@ snapshots:
       section-matter: 1.0.0
       strip-bom-string: 1.0.0
 
-  hono-openapi@1.3.3(hono@4.13.13)(zod@4.6.5):
+  hono-openapi@1.3.3(hono@4.13.13)(zod@4.6.6):
     dependencies:
       '@hono/standard-validator': 0.4.0(@standard-schema/spec@1.1.0)(hono@4.13.13)
-      '@standard-community/standard-json': 0.3.6(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(zod@4.6.5)
-      '@standard-community/standard-openapi': 0.2.10(@standard-community/standard-json@0.3.6(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(zod@4.6.5))(@standard-schema/spec@1.1.0)(openapi-types@12.1.3)(zod@4.6.5)
+      '@standard-community/standard-json': 0.3.6(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(zod@4.6.6)
+      '@standard-community/standard-openapi': 0.2.10(@standard-community/standard-json@0.3.6(@standard-schema/spec@1.1.0)(@types/json-schema@7.0.15)(zod@4.6.6))(@standard-schema/spec@1.1.0)(openapi-types@12.1.3)(zod@4.6.6)
       '@standard-schema/spec': 1.1.0
       '@types/json-schema': 7.0.15
       hono: 4.13.13
@@ -1650,7 +1659,7 @@ snapshots:
 
   isexe@2.0.0: {}
 
-  jose@6.2.12: {}
+  jose@6.2.15: {}
 
   jpeg-js@0.4.4: {}
 
@@ -2020,7 +2029,7 @@ snapshots:
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.2
-      '@types/node': 26.6.4
+      '@types/node': 26.6.6
       long: 5.3.2
     optional: true
 
@@ -2176,8 +2185,8 @@ snapshots:
 
   zod-from-json-schema@0.5.6:
     dependencies:
-      zod: 4.6.5
+      zod: 4.6.6
 
-  zod@4.6.5: {}
+  zod@4.6.6: {}
 
   zwitch@2.0.4: {}
