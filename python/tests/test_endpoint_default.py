@@ -21,7 +21,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import convergent
-from convergent import _core, _registry, _transport
+from convergent import _core, _transport
 
 _KEY = "k-endpoint"  # pragma: allowlist secret
 _DOCUMENTED_DEFAULT = "https://ingest.convergent.dev"
@@ -41,9 +41,6 @@ def reset_sdk(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "CONVERGENT_STRICT",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(
-        _registry, "post_json", lambda *a, **k: {"deployment_id": "dep_test", "is_new": True}
-    )
     monkeypatch.setattr(
         _transport, "build_processor", lambda **_: SimpleSpanProcessor(InMemorySpanExporter())
     )

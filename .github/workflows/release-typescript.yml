@@ -2,26 +2,26 @@
 #
 # Pushing a tag like typescript-v0.1.0 runs ci-typescript.yml and the release
 # preflight (.github/scripts/release-preflight.sh: the tag names the version in
-# typescript/package.json, is on main, and typescript/CHANGELOG.md has its
-# section). It then packs the package once, publishes that tarball through npm
-# trusted publishing (OIDC, environment "npm"), and creates a GitHub Release
-# whose notes are that changelog section. The preflight runs before the
-# publish, so a mismatch publishes nothing. Python releases use python-v* tags
-# in release.yml.
+# typescript/package.json, is on main, typescript/CHANGELOG.md has its
+# section, and the generated telemetry-keys.ts records REGISTRY_SHA256). It
+# then packs the package once, publishes that tarball through npm trusted
+# publishing (OIDC, environment "npm"), and creates a GitHub Release whose
+# notes are that changelog section plus the telemetry registry's sha256. The
+# preflight runs before the publish, so a mismatch publishes nothing. Python
+# releases use python-v* tags in release.yml.
 #
 # To release, land a commit on main that bumps the version in
-# typescript/package.json and adds its section to typescript/CHANGELOG.md,
-# then push typescript-v<version> on that commit.
+# typescript/package.json and adds its section to typescript/CHANGELOG.md.
+# Maintainers then run one release command from the source tree this
+# repository mirrors: it syncs, pushes typescript-v<version> on main, and
+# checks npm's provenance record. This repository's "release tags" ruleset
+# limits who can push that tag, so pushing it publishes.
 #
-# One-time setup, done by a person before the first release, in this order:
-# 1. In this repository's settings, create the environment "npm" with the same
-#    required reviewers as "pypi", and limit its deployments to tags matching
-#    typescript-v*.
-# 2. On npmjs.com, in the convergent-sdk package settings, add a trusted
-#    publisher: GitHub Actions, organization convergent-technologies,
-#    repository convergent-sdk, workflow release-typescript.yml, environment npm.
-# The order matters. A job that names a missing environment creates it with no
-# protection, so a tag pushed before step 1 could publish without review.
+# The "npm" environment (typescript-v* tags only, no reviewers) and npm's
+# trusted publisher (repository convergent-sdk, workflow
+# release-typescript.yml, environment npm) are declared in that source tree. A
+# job that names a missing environment creates it admitting every ref, so the
+# environment must exist before a tag.
 #
 # Trusted publishing needs npm 11.5.1 or newer. Node.js 24 bundles it and
 # Node.js 22 does not, so the publish job runs on 24. No npm token exists.

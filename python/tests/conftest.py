@@ -24,3 +24,14 @@ def _isolate_otel_service_name() -> Iterator[None]:
     os.environ.pop("OTEL_SERVICE_NAME", None)
     if original is not None:
         os.environ["OTEL_SERVICE_NAME"] = original
+
+
+@pytest.fixture(autouse=True)
+def _no_workspace_tag_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the workspace-tag request off the network in-process.
+
+    ``init()`` and ``otel.install()`` send ``GET /v1/check`` on a thread of their
+    own, which would race tests that count check requests. test_sdk_tag_fetch.py
+    runs the real fetch.
+    """
+    monkeypatch.setattr("convergent._tag_fetch.fetch_workspace_tag", lambda *_: None)

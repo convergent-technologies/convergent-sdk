@@ -11,6 +11,8 @@ export interface FlushOptions {
 
 export interface FlushResult {
   ok: boolean;
+  // Spans dropped from a full send queue since the last flush().
+  dropped: number;
   elapsedMs: number;
 }
 
@@ -60,7 +62,7 @@ async function within(
 export async function flush(options: FlushOptions = {}): Promise<FlushResult> {
   const started = performance.now();
   const configuration = activeConfiguration();
-  if (!configuration) return { ok: true, elapsedMs: 0 };
+  if (!configuration) return { ok: true, dropped: 0, elapsedMs: 0 };
   // options can be null from JavaScript callers.
   const timeoutMs = budget(options?.timeoutMs, 5000, "timeoutMs");
   const uploadTimeoutMs = budget(options?.uploadTimeoutMs, 60_000, "uploadTimeoutMs");
@@ -85,7 +87,11 @@ export async function flush(options: FlushOptions = {}): Promise<FlushResult> {
     );
     ok = ok && uploaded;
   }
-  return { ok, elapsedMs: Math.trunc(performance.now() - started) };
+  return {
+    ok,
+    dropped: configuration.processor.takeDropped(),
+    elapsedMs: Math.trunc(performance.now() - started),
+  };
 }
 
 /**

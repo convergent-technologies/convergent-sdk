@@ -6,6 +6,14 @@ tool call they write ``gen_ai.tool.call.arguments`` and
 hold one value each. On every other span they write ``gen_ai.input.messages`` and
 ``gen_ai.output.messages``, which hold a message *array*, so a value that is not
 already one is wrapped as the text content of a single message.
+
+On a span :func:`span` opened, the output is held until the span ends and
+written only when the block exits without an exception, so a failed or
+cancelled call never ships a partial answer as its result. A decorated
+generator its reader stops after a chunk (``break``, ``next()``, ``islice``,
+``zip``, ``close()``) ends normally and keeps the output recorded so far. An
+exception still marks the span's status as an error, and a cancellation leaves
+it unset.
 """
 
 from __future__ import annotations
@@ -36,6 +44,24 @@ from opentelemetry.trace import (
 )
 
 from . import _artifacts, _policy, _processors
+from ._telemetry_keys import (
+    CONVERGENT_AGENT_SYSTEM_INSTRUCTIONS,
+    CONVERGENT_AGENT_TOOLS,
+    CONVERGENT_CONTENT_SOURCE,
+    CONVERGENT_SESSION_ID,
+    GEN_AI_AGENT_NAME,
+    GEN_AI_AGENT_VERSION,
+    GEN_AI_INPUT_MESSAGES,
+    GEN_AI_OPERATION_NAME,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_REQUEST_MODEL,
+    GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_ID,
+    GEN_AI_TOOL_CALL_RESULT,
+    GEN_AI_TOOL_NAME,
+    GEN_AI_TOOL_TYPE,
+    OPERATIONS,
+)
 
 logger = logging.getLogger("convergent.sdk")
 
@@ -78,30 +104,23 @@ _TRACER_NAME = "convergent.sdk"
 #: ownership.
 _opened_spans: weakref.WeakSet[Span] = weakref.WeakSet()
 
-_OPERATIONS: dict[str, str] = {
-    "agent_run": "invoke_agent",
-    "model_call": "chat",
-    "tool_call": "execute_tool",
-    "retrieval": "retrieval",
-    "embeddings": "embeddings",
-    "workflow": "invoke_workflow",
-    "agent_create": "create_agent",
-    "text_completion": "text_completion",
-    "generate_content": "generate_content",
-}
-_SEMANTIC_VERSION = "1"
-_EXECUTION_KEY = "convergent.execution.id"
+#: The output ``set_output`` recorded on a span :func:`span` opened, held until
+#: the block exits. Written only when it exits without an exception; a
+#: decorated generator its reader closes exits normally.
+_held_output: weakref.WeakKeyDictionary[Span, dict[str, str]] = weakref.WeakKeyDictionary()
 
 #: Marks a span whose message content ``set_input``/``set_output`` wrote. Ingest
 #: reads it to decide whether to mirror the standard message keys onto the
 #: ``convergent.*`` ones. ``set_attribute`` rejects every ``convergent.``-prefixed
-#: key, so a caller cannot write it.
-_CONTENT_SOURCE_KEY = "convergent.content.source"
+#: key, so a caller cannot write it. The same literal lives in the TypeScript
+#: SDK's ``spans.ts`` and in ingest's ``otel_span_mapper.py``; change all three.
 _CONTENT_SOURCE = "sdk"
 
 #: The ``gen_ai.operation.name`` of a tool call. Tool content goes to the GenAI
 #: tool keys rather than the message keys, and ingest keys off the same value.
-_TOOL_OPERATION = "execute_tool"
+_TOOL_OPERATION = OPERATIONS["tool_call"]
+#: The ``gen_ai.operation.name`` of an agent run.
+_AGENT_OPERATION = OPERATIONS["agent_run"]
 
 #: What a tool span says its tool is when the caller does not say. The
 #: conventions' vocabulary is ``function`` for a tool the client runs,
@@ -129,19 +148,17 @@ _CALL_ID_LIMIT = 256
 #: scalar that ``decode_messages`` returns ``None`` for and the content is lost.
 _RESERVED_ATTRIBUTE_KEYS = frozenset(
     {
-        "gen_ai.operation.name",
-        "gen_ai.agent.name",
-        "gen_ai.agent.version",
-        "gen_ai.tool.name",
-        "gen_ai.input.messages",
-        "gen_ai.output.messages",
-        "gen_ai.tool.call.arguments",
-        "gen_ai.tool.call.result",
+        GEN_AI_OPERATION_NAME,
+        GEN_AI_AGENT_NAME,
+        GEN_AI_AGENT_VERSION,
+        GEN_AI_TOOL_NAME,
+        GEN_AI_INPUT_MESSAGES,
+        GEN_AI_OUTPUT_MESSAGES,
+        GEN_AI_TOOL_CALL_ARGUMENTS,
+        GEN_AI_TOOL_CALL_RESULT,
     }
 )
-_AGENT_SYSTEM_INSTRUCTIONS_KEY = "convergent.agent.system_instructions"
-_AGENT_TOOLS_KEY = "convergent.agent.tools"
-_SESSION_CONTEXT_KEYS = frozenset(("gen_ai.conversation.id", "session.id", _processors.SESSION_KEY))
+_SESSION_CONTEXT_KEYS = frozenset(("gen_ai.conversation.id", "session.id", CONVERGENT_SESSION_ID))
 _CONTROL_FLOW_EXCEPTIONS = (GeneratorExit, asyncio.CancelledError)
 
 #: Reasons already reported in this process. Bounded by the number of distinct
@@ -251,17 +268,36 @@ class SpanHandle:
 
     def set_input(self, value: Any) -> None:
         if self._operation == _TOOL_OPERATION:
-            self._span.set_attribute("gen_ai.tool.call.arguments", _text(value))
+            self._set_content(GEN_AI_TOOL_CALL_ARGUMENTS, _text(value))
             return
-        self._span.set_attribute("gen_ai.input.messages", _messages("user", value))
-        self._span.set_attribute(_CONTENT_SOURCE_KEY, _CONTENT_SOURCE)
+        if self._set_content(GEN_AI_INPUT_MESSAGES, _messages("user", value)):
+            self._span.set_attribute(CONVERGENT_CONTENT_SOURCE, _CONTENT_SOURCE)
 
     def set_output(self, value: Any) -> None:
+        """Record the span's output. On a span :func:`span` opened it is held
+        and written when the block exits without an exception; on any other
+        span, whose end the SDK does not see, it is written at once."""
         if self._operation == _TOOL_OPERATION:
-            self._span.set_attribute("gen_ai.tool.call.result", _text(value))
+            key, encoded = GEN_AI_TOOL_CALL_RESULT, _text(value)
+        else:
+            key, encoded = GEN_AI_OUTPUT_MESSAGES, _messages("assistant", value)
+        if encoded is None:
+            # A dropped final answer must not leave an earlier partial one to ship.
+            _held_output.pop(self._span, None)
             return
-        self._span.set_attribute("gen_ai.output.messages", _messages("assistant", value))
-        self._span.set_attribute(_CONTENT_SOURCE_KEY, _CONTENT_SOURCE)
+        output = {key: encoded}
+        if key == GEN_AI_OUTPUT_MESSAGES:
+            output[CONVERGENT_CONTENT_SOURCE] = _CONTENT_SOURCE
+        if self._span in _opened_spans and self._span.is_recording():
+            _held_output[self._span] = output
+            return
+        self._span.set_attributes(output)
+
+    def _set_content(self, key: str, encoded: str | None) -> bool:
+        if encoded is None:
+            return False
+        self._span.set_attribute(key, encoded)
+        return True
 
     def set_tool_call_id(self, call_id: str) -> None:
         """Record the id the model issued for this tool call.
@@ -281,7 +317,7 @@ class SpanHandle:
                 f"string of 1-{_CALL_ID_LIMIT} characters.",
             )
             return
-        self._span.set_attribute("gen_ai.tool.call.id", call_id)
+        self._span.set_attribute(GEN_AI_TOOL_CALL_ID, call_id)
 
     def input_artifact(
         self,
@@ -411,11 +447,12 @@ def observe(
     logged once and the span is recorded with no context pairs.
 
     ``model`` is the model the span asks for and lands as ``gen_ai.request.model``
-    on any operation. ``system_instructions`` and ``tools`` describe the agent as
-    configured: the prompt it runs with and the tool definitions it offers. They
-    apply when the operation resolves to ``invoke_agent``, which ``agent_run`` and
+    on any operation; an empty one is dropped and logged once.
+    ``system_instructions`` and ``tools`` describe the agent as configured: the
+    prompt it runs with and the tool definitions it offers. They apply when the
+    operation resolves to ``invoke_agent``, which ``agent_run`` and
     ``operation="invoke_agent"`` both do, and land on that one span, ``tools`` as
-    one JSON string.
+    one JSON string. Content that is not portable JSON is dropped and logged once.
 
     Never raises. A name outside 1-128 characters or an unrecognized operation is
     logged and the span is still recorded -- ingest is where a bad name is
@@ -450,8 +487,17 @@ def observe(
             @functools.wraps(function)
             async def async_generator_wrapper(*args: Any, **kwargs: Any) -> Any:
                 with opened(args, kwargs):
-                    async for item in function(*args, **kwargs):
-                        yield item
+                    stream = function(*args, **kwargs)
+                    try:
+                        async for item in stream:
+                            yield item
+                    except GeneratorExit:
+                        # Only a yield is closed, so the reader stopped after a
+                        # chunk: a finish, not a cancel, and the output stays.
+                        # Closed here so the stream's own finally runs inside
+                        # the span, as yield from does below.
+                        await stream.aclose()
+                        return
 
             return cast(F, async_generator_wrapper)
 
@@ -460,7 +506,12 @@ def observe(
             @functools.wraps(function)
             def generator_wrapper(*args: Any, **kwargs: Any) -> Any:
                 with opened(args, kwargs):
-                    yield from function(*args, **kwargs)
+                    try:
+                        yield from function(*args, **kwargs)
+                    except GeneratorExit:
+                        # As above. yield from has already closed the inner
+                        # generator, and an error from that close skips this.
+                        return
 
             return cast(F, generator_wrapper)
 
@@ -655,36 +706,39 @@ def span(
         return
 
     operation_name = _semconv_operation(operation)
-    span_attributes: dict[str, Any] = {
-        "gen_ai.operation.name": operation_name,
-        "convergent.semantic.version": _SEMANTIC_VERSION,
-    }
+    span_attributes: dict[str, Any] = {GEN_AI_OPERATION_NAME: operation_name}
     if isinstance(attributes, Mapping):
         span_attributes.update({k: v for k, v in attributes.items() if _accepted(k, v)})
     span_name = name
-    if model is not None:
-        span_attributes["gen_ai.request.model"] = model
+    if isinstance(model, str) and not model.strip():
+        _report_once(
+            "empty_model",
+            "Convergent ignored an empty model name. Pass the model's name, or leave model= out.",
+            level=logging.WARNING,
+        )
+    elif model is not None:
+        span_attributes[GEN_AI_REQUEST_MODEL] = model
     agent_identity = {"system_instructions=": system_instructions, "tools=": tools}
     passed = [label for label, value in agent_identity.items() if value is not None]
-    if operation_name != "invoke_agent" and passed:
+    if operation_name != _AGENT_OPERATION and passed:
         _report_once(
             "agent_identity_outside_agent_run",
             f"Convergent ignored {', '.join(passed)}: these parameters describe an "
             "agent run, and this span records a different operation.",
         )
-    if operation_name == "invoke_agent":
-        span_attributes["gen_ai.agent.name"] = name
+    if operation_name == _AGENT_OPERATION:
+        span_attributes[GEN_AI_AGENT_NAME] = name
         if state.release is not None:
-            span_attributes["gen_ai.agent.version"] = state.release
+            span_attributes[GEN_AI_AGENT_VERSION] = state.release
         if system_instructions is not None:
-            span_attributes[_AGENT_SYSTEM_INSTRUCTIONS_KEY] = system_instructions
-        if tools is not None:
-            span_attributes[_AGENT_TOOLS_KEY] = _dump(tools)
-        span_name = f"invoke_agent {name}"
+            span_attributes[CONVERGENT_AGENT_SYSTEM_INSTRUCTIONS] = system_instructions
+        if tools is not None and (encoded_tools := _dump(tools)) is not None:
+            span_attributes[CONVERGENT_AGENT_TOOLS] = encoded_tools
+        span_name = f"{_AGENT_OPERATION} {name}"
     elif operation_name == _TOOL_OPERATION:
-        span_attributes["gen_ai.tool.name"] = name
-        span_attributes.setdefault("gen_ai.tool.type", _DEFAULT_TOOL_TYPE)
-        span_name = f"execute_tool {name}"
+        span_attributes[GEN_AI_TOOL_NAME] = name
+        span_attributes.setdefault(GEN_AI_TOOL_TYPE, _DEFAULT_TOOL_TYPE)
+        span_name = f"{_TOOL_OPERATION} {name}"
 
     context_pairs: dict[str, Any] = {}
     # Checked before the Mapping branch: the sentinel is itself a Mapping.
@@ -722,14 +776,19 @@ def span(
             _opened_spans.add(current)
             _warn_on_split_trace(current, open_before)
             handle = SpanHandle(current, operation=operation_name)
+            succeeded = False
             try:
                 yield handle
+                succeeded = True
             except _CONTROL_FLOW_EXCEPTIONS:
                 raise
             except BaseException as error:
                 current.set_status(Status(StatusCode.ERROR, type(error).__name__))
                 raise
             finally:
+                output = _held_output.pop(current, None)
+                if succeeded and output is not None:
+                    current.set_attributes(output)
                 _processors.release_marks(current)
     finally:
         # Clamped because a generator started in one context and closed in another
@@ -824,14 +883,17 @@ def session(session_id: str) -> Iterator[None]:
 
     Library spans are included unless they already carry their own id. Nested
     blocks use the innermost id and restore the outer id when they end. The id
-    stays in this process and is not added to OpenTelemetry baggage. Invalid ids
-    are logged and the block runs unchanged.
+    is not added to OpenTelemetry baggage. It enters an outbound request only to
+    a host listed in ``init(session_hosts=...)``, or a carrier filled with
+    ``convergent.carrier.inject(..., session=True)``, and a receiving process
+    takes it from that request. Invalid ids are logged and the block runs
+    unchanged.
     """
     value = _session_value(session_id)
     if value is None:
         yield
         return
-    token = _processors.attach_context({_processors.SESSION_KEY: value})
+    token = _processors.attach_context({CONVERGENT_SESSION_ID: value})
     try:
         yield
     finally:
@@ -866,7 +928,7 @@ def current_span() -> SpanHandle | _NoOpSpanHandle:
     # back from the span. Best-effort: only an SDK-backed span exposes its
     # attributes, and a foreign one falls back to the message keys.
     attributes = getattr(active, "attributes", None)
-    operation = attributes.get("gen_ai.operation.name") if isinstance(attributes, Mapping) else ""
+    operation = attributes.get(GEN_AI_OPERATION_NAME) if isinstance(attributes, Mapping) else ""
     return SpanHandle(active, operation=operation if isinstance(operation, str) else "")
 
 
@@ -961,7 +1023,7 @@ def _semconv_operation(operation: str) -> str:
     """
     if not isinstance(operation, str):
         return str(operation)
-    return _OPERATIONS.get(operation, operation)
+    return OPERATIONS.get(operation, operation)
 
 
 def _report_invalid(name: Any, operation: Any) -> None:
@@ -985,20 +1047,19 @@ def _report_invalid(name: Any, operation: Any) -> None:
     # it, because ``span()`` gives the two the same treatment.
     if not isinstance(operation, str) or not _recognized_operation(operation):
         # WARNING, not ERROR. A custom operation is documented as supported --
-        # _semconv_operation records it verbatim and SemanticSpanProcessor still
-        # joins its execution -- so ERROR here would train callers to ignore the
-        # level we use for things that are actually broken.
+        # _semconv_operation records it verbatim -- so ERROR here would train
+        # callers to ignore the level we use for things that are actually broken.
         _report_once(
             "invalid_operation",
             f"Convergent recorded a span with the unrecognized operation {operation!r}. "
             f"It is stored as given but will not map to a first-class concept. Known "
-            f"operations: {', '.join(_OPERATIONS)}.",
+            f"operations: {', '.join(OPERATIONS)}.",
             level=logging.WARNING,
         )
 
 
 def _recognized_operation(operation: str) -> bool:
-    return operation in _OPERATIONS or operation in _OPERATIONS.values()
+    return operation in OPERATIONS or operation in OPERATIONS.values()
 
 
 def _report_once(key: str, message: str, *, level: int = logging.ERROR) -> None:
@@ -1025,17 +1086,23 @@ def _valid_attribute(value: Any) -> bool:
     return False
 
 
-def _messages(role: str, value: Any) -> str:
-    """Encode ``value`` as a ``gen_ai.*.messages`` attribute.
+def _messages(role: str, value: Any) -> str | None:
+    """Encode ``value`` as a ``gen_ai.*.messages`` attribute, or ``None`` when
+    it is not portable JSON.
 
     That attribute is a message *array*, and our own reader drops anything that
     does not decode to a list -- so a caller's bare dict cannot go through as-is.
     A value already shaped like a message list passes untouched; anything else
     becomes the text content of one message. Nothing is filtered or bounded here.
     """
+    if isinstance(value, list):
+        value = [_plain(item) for item in value]
     if _is_message_list(value):
         return _dump(value)
-    return _dump([{"role": role, "parts": [{"type": "text", "content": _text(value)}]}])
+    content = _text(value)
+    if content is None:
+        return None
+    return _dump([{"role": role, "parts": [{"type": "text", "content": content}]}])
 
 
 def _is_message_list(value: Any) -> bool:
@@ -1046,45 +1113,53 @@ def _is_message_list(value: Any) -> bool:
     )
 
 
-def _text(value: Any) -> str:
-    """A string is recorded as it stands; anything else as JSON."""
+def _text(value: Any) -> str | None:
+    """A string is recorded as it stands; anything else as JSON, or ``None`` when
+    it is not portable JSON."""
     return value if isinstance(value, str) else _dump(value)
 
 
-def _dump(value: Any) -> str:
-    """JSON, never raising. ``default`` covers an unserializable object; the
-    first except covers what it cannot, such as a circular reference.
+def _model_json(value: Any) -> Any:
+    """A pydantic model as ``model_dump(mode="json")`` gives it: the plain object
+    the TypeScript SDK gets from the same model client. Raises for anything else."""
+    model_dump = getattr(value, "model_dump", None)
+    if not callable(model_dump):
+        raise TypeError(f"{type(value).__name__} is not portable JSON")
+    return model_dump(mode="json")
 
-    The second except covers the fallback itself. ``repr`` runs the caller's own
-    code, so an object whose ``__repr__`` raises defeats both ``default=repr``
-    and the fallback, and the exception escapes into the caller's ``set_input``
-    call. That is the one contract this SDK makes.
+
+def _plain(value: Any) -> Any:
+    """``value`` as :func:`_model_json` gives it, or as it stands."""
+    try:
+        return _model_json(value)
+    except Exception:
+        return value
+
+
+def _dump(value: Any) -> str | None:
+    """Compact JSON, or ``None``, logged once, for a value that is not portable
+    JSON: an object JSON has no form for, NaN or an infinity, or a circular
+    reference. A pydantic model at any depth is encoded by :func:`_model_json`.
+
+    No ``repr`` fallback: the TypeScript SDK has none, so the same object would
+    be stored two ways. Never raises.
     """
     try:
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=repr)
+        return json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), allow_nan=False, default=_model_json
+        )
     except Exception:
-        pass
-    try:
-        return repr(value)
-    except Exception:
-        return "<unrepresentable>"
+        _report_once(
+            "content_not_json",
+            "Convergent dropped span content that is not portable JSON. Pass dicts, "
+            "lists, strings, finite numbers, booleans, None, and pydantic models.",
+            level=logging.WARNING,
+        )
+        return None
 
 
 class SemanticSpanProcessor(SpanProcessor):
-    """Stamps the execution id, semantic version, and deployment identity on
-    every GenAI span, and the release on an agent invocation that does not name
-    its own version.
-
-    The execution id is the span's own trace id, which is what groups one run's
-    spans together. Work that crosses a process boundary keeps the same trace id
-    through the standard ``traceparent`` header, so one run still groups correctly
-    across processes and this SDK adds nothing of its own to what a caller sends
-    out.
-
-    The deployment identity must ride the span: when ``init()`` attaches to a
-    provider the caller already owns, that provider's Resource is theirs and
-    frozen, so a trace from an attached process would otherwise reach ingest
-    with no deployment to link to.
+    """Stamps the release on an agent invocation that does not name its own version.
 
     This deliberately never stamps ``gen_ai.agent.name``. :func:`span` already
     sets it for an ``agent_run``, and a framework agent names itself. An agent
@@ -1092,36 +1167,21 @@ class SemanticSpanProcessor(SpanProcessor):
     a better name from the trace tree or the service name than this could guess.
     """
 
-    def __init__(
-        self, release: str | None = None, deployment: Mapping[str, str] | None = None
-    ) -> None:
+    def __init__(self, release: str | None = None) -> None:
         self._release = release
-        self._deployment = dict(deployment or {})
 
     def on_start(
         self,
         span: SDKSpan,
         parent_context: context.Context | None = None,  # noqa: ARG002
     ) -> None:
-        # Any span declaring a GenAI operation is agent work, including one whose
-        # operation is not in the standard set -- a caller's own operation still
-        # belongs to the execution it ran inside.
         attributes = span.attributes or {}
-        operation = attributes.get("gen_ai.operation.name")
-        if not isinstance(operation, str) or not operation:
-            return
-
-        span.set_attribute(_EXECUTION_KEY, f"{span.get_span_context().trace_id:032x}")
-        span.set_attribute("convergent.semantic.version", _SEMANTIC_VERSION)
-        for key, value in self._deployment.items():
-            if key not in attributes:
-                span.set_attribute(key, value)
         if (
-            operation == "invoke_agent"
+            attributes.get(GEN_AI_OPERATION_NAME) == _AGENT_OPERATION
             and self._release is not None
-            and "gen_ai.agent.version" not in attributes
+            and GEN_AI_AGENT_VERSION not in attributes
         ):
-            span.set_attribute("gen_ai.agent.version", self._release)
+            span.set_attribute(GEN_AI_AGENT_VERSION, self._release)
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:  # noqa: ARG002
         """Nothing is buffered here -- ``on_start`` sets attributes and returns.

@@ -1,10 +1,7 @@
-"""Network mechanics of the SDK's two HTTP calls, against a real loopback server.
+"""Network mechanics of ``check()``'s HTTP call, against a real loopback server.
 
-``post_json`` and ``get_json`` both run inside every customer process and both carry
-the org API key, so their retry, redirect, and bounding behavior are contracts, not
-implementation details. Lifted from the pre-rewrite suite when the helper itself was
-restored; every other SDK test monkeypatches these away, which leaves exactly this
-behavior unpinned.
+``get_json`` runs inside a customer process and carries the org API key, so its
+redirect and single-attempt behavior are contracts, not implementation details.
 """
 
 from __future__ import annotations
@@ -15,12 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from convergent._registry import (
-    MAX_RESPONSE_BYTES,
-    RegistrationError,
-    get_json,
-    post_json,
-)
+from convergent._registry import MAX_RESPONSE_BYTES, RegistrationError, get_json
 
 
 class _FakeRegistry:
@@ -79,53 +71,6 @@ class _FakeRegistry:
         self._thread.join(timeout=5)
 
 
-def test_post_json_retries_5xx_then_succeeds() -> None:
-    with _FakeRegistry([(500, {}), (500, {}), (200, {"deployment_id": "dep_ok"})]) as registry:
-        result = post_json(
-            f"{registry.url}/v1/deployments", {"x": 1}, headers={}, sleep=lambda _s: None
-        )
-
-    assert result == {"deployment_id": "dep_ok"}
-    assert len(registry.requests) == 3, "500 twice then 200 must take exactly three attempts"
-
-
-def test_post_json_never_retries_a_404() -> None:
-    with _FakeRegistry([(404, {"error": "no such route"})]) as registry:
-        with pytest.raises(RegistrationError):
-            post_json(f"{registry.url}/v1/deployments", {"x": 1}, headers={}, sleep=lambda _s: None)
-
-    assert len(registry.requests) == 1, "a 404 is terminal -- no retry"
-
-
-def test_post_json_never_retries_a_401() -> None:
-    """Rotated or wrong credentials are terminal. Retrying would hammer the
-    control plane on every restart of a misconfigured fleet."""
-    with _FakeRegistry([(401, {})]) as registry:
-        with pytest.raises(RegistrationError) as error:
-            post_json(f"{registry.url}/v1/deployments", {"x": 1}, headers={}, sleep=lambda _s: None)
-
-    assert error.value.reason == "http_401"
-    assert len(registry.requests) == 1
-
-
-def test_post_json_refuses_to_follow_a_redirect() -> None:
-    """The Bearer key must never be re-sent to a redirect target: a 3xx is
-    surfaced as a terminal error, not followed."""
-    with _FakeRegistry([(302, {})]) as registry:
-        redirect: dict[str, object] = {"location": f"{registry.url}/elsewhere"}
-        registry.responses[0] = (302, redirect)
-        with pytest.raises(RegistrationError):
-            post_json(
-                f"{registry.url}/v1/deployments",
-                {"x": 1},
-                headers={"Authorization": "Bearer secret"},  # must not be re-sent anywhere
-                sleep=lambda _s: None,
-            )
-
-    assert len(registry.requests) == 1, "a redirect must not be followed (would be 2 requests)"
-    assert registry.requests[0]["path"] == "/v1/deployments"
-
-
 def test_get_json_sends_the_credential_and_makes_one_attempt() -> None:
     """The server answers about whichever organization the key belongs to, so a GET
     that dropped the header would report on nobody."""
@@ -151,8 +96,8 @@ def test_get_json_reports_a_rejected_key_as_a_reason() -> None:
 
 
 def test_get_json_refuses_to_follow_a_redirect() -> None:
-    """Same guarantee as the POST: the Bearer key is never re-sent to a redirect
-    target, so a 3xx is surfaced as an error instead of being followed."""
+    """The Bearer key is never re-sent to a redirect target, so a 3xx is surfaced
+    as an error instead of being followed."""
     with _FakeRegistry([(302, {})]) as registry:
         redirect: dict[str, object] = {"location": f"{registry.url}/elsewhere"}
         registry.responses[0] = (302, redirect)
@@ -163,77 +108,30 @@ def test_get_json_refuses_to_follow_a_redirect() -> None:
     assert registry.requests[0]["path"] == "/v1/check"
 
 
-def test_post_json_stops_at_its_deadline_rather_than_its_attempt_cap() -> None:
-    """A server that keeps failing must not run past the deadline, even with a
-    generous attempt cap: the elapsed time, not the attempt count, bounds it.
-
-    The clock here is a number this test adds to, and the only thing that adds to
-    it is the retry backoff. Backoff doubles from 0.01s, so the fourth wait would
-    land at 0.15s, past the 0.1s deadline, and the loop stops with three waits
-    behind it. Nothing is measured against the real clock, so a busy machine
-    cannot change the count.
-    """
-    now = 0.0
-
-    def sleep(seconds: float) -> None:
-        nonlocal now
-        now += seconds
-
-    with _FakeRegistry([(503, {})]) as registry:
-        with pytest.raises(RegistrationError):
-            post_json(
-                f"{registry.url}/v1/deployments",
-                {"x": 1},
-                headers={},
-                max_attempts=100,
-                base_backoff=0.01,
-                deadline=0.1,
-                sleep=sleep,
-                monotonic=lambda: now,
-                rng=lambda: 1.0,
-            )
-
-    assert now < 0.1, "the loop stopped before the deadline it was given"
-    assert len(registry.requests) == 4, "the deadline, not max_attempts, stopped the loop"
-
-
-def test_post_json_rejects_an_oversized_response() -> None:
-    """The size cap guards memory in the caller's process against a hostile or
-    broken endpoint."""
-    with _FakeRegistry([(200, {"pad": "x" * (MAX_RESPONSE_BYTES + 1)})]) as registry:
-        with pytest.raises(RegistrationError) as error:
-            post_json(f"{registry.url}/v1/deployments", {"x": 1}, headers={})
-
-    assert error.value.reason == "response_too_large"
-
-
-def test_post_json_reports_a_malformed_url_as_terminal() -> None:
-    """A bad endpoint never improves on retry, and must not escape as a raw
-    ValueError from urllib."""
-    with pytest.raises(RegistrationError) as error:
-        post_json("not-a-url", {"x": 1}, headers={})
-
-    assert error.value.reason == "bad_url"
-
-
-def test_post_json_reports_an_unserializable_payload_as_terminal() -> None:
-    with pytest.raises(RegistrationError) as error:
-        post_json("http://127.0.0.1:1/x", {"bad": object()}, headers={})
-
-    assert error.value.reason == "bad_payload"
-
-
 def test_registration_error_never_carries_the_response_body() -> None:
     """``reason`` is coarse and safe to log; the body can echo the request, which
     carries the API key."""
     with _FakeRegistry([(404, {"secret-echo": "Bearer super-secret"})]) as registry:
         with pytest.raises(RegistrationError) as error:
-            post_json(
-                f"{registry.url}/v1/deployments",
-                {"x": 1},
-                headers={"Authorization": "Bearer super-secret"},
-                sleep=lambda _s: None,
-            )
+            get_json(f"{registry.url}/v1/check", headers={"Authorization": "Bearer super-secret"})
 
     assert "super-secret" not in str(error.value)
     assert error.value.reason == "http_404"
+
+
+def test_get_json_rejects_an_oversized_response() -> None:
+    """The size cap guards memory in the caller's process against a hostile or
+    broken endpoint."""
+    with _FakeRegistry([(200, {"pad": "x" * (MAX_RESPONSE_BYTES + 1)})]) as registry:
+        with pytest.raises(RegistrationError) as error:
+            get_json(f"{registry.url}/v1/check", headers={})
+
+    assert error.value.reason == "response_too_large"
+
+
+def test_get_json_reports_a_malformed_url_as_a_reason() -> None:
+    """A bad endpoint must not escape as a raw ValueError from urllib."""
+    with pytest.raises(RegistrationError) as error:
+        get_json("not-a-url", headers={})
+
+    assert error.value.reason == "bad_url"

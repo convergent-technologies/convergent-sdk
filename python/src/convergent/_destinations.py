@@ -1,9 +1,8 @@
 """Where spans go, besides Convergent.
 
 ``api_key`` already implies the Convergent destination. ``endpoint`` can override
-its managed address. The same address registers the deployment and receives
-spans. Anything in ``init(destinations=...)`` is *added* on top, and every span
-the filters keep goes to all of them.
+its managed address. Anything in ``init(destinations=...)`` is *added* on top,
+and every span the filters keep goes to all of them.
 
 These are inert descriptions, not exporters. ``_core`` turns each one into a span
 processor when ``init()`` runs, so constructing one opens no descriptor and makes

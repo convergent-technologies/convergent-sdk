@@ -32,7 +32,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 import convergent
 import convergent.otel
 from convergent.otel import ConvergentSpanProcessor
-from convergent import _config, _core, _registry, _transport
+from convergent import _config, _core, _transport
 from convergent._file_export import SPANS_FILENAME
 
 _KEY = "k-init"  # pragma: allowlist secret
@@ -53,9 +53,6 @@ def reset_sdk(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "OTEL_EXPORTER_OTLP_HEADERS",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(
-        _registry, "post_json", lambda *a, **k: {"deployment_id": "dep_test", "is_new": True}
-    )
     monkeypatch.setattr(
         _transport, "build_processor", lambda **_: SimpleSpanProcessor(InMemorySpanExporter())
     )
@@ -491,30 +488,6 @@ def test_a_valid_init_after_a_raising_one_configures_the_process() -> None:
 # --------------------------------------------------------------------------
 # init() stays quiet
 # --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "reason",
-    ["URLError", "http_401", "http_500"],
-    ids=["receiver_unreachable", "revoked_key", "server_error"],
-)
-def test_a_failed_registration_does_not_raise(
-    reason: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Network and server state. A revoked key or a receiver outage during a fleet
-    restart must not stop the fleet from booting."""
-
-    def refuse(*_: object, **__: object) -> dict[str, object]:
-        raise _registry.RegistrationError(reason)
-
-    monkeypatch.setattr(_registry, "post_json", refuse)
-
-    with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
-        status = convergent.init(api_key=_KEY, endpoint=_ENDPOINT, release="r1")
-
-    assert status.enabled is True
-    assert status.deployment is None, "the release rides every trace as the fallback"
-    assert [message for message in _sdk_warnings(caplog) if "registration failed" in message]
 
 
 def test_a_second_init_with_a_bad_agents_value_does_not_raise(

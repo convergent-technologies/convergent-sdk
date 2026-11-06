@@ -56,9 +56,10 @@ jobs:
       - run: uvx 'check-wheel-contents==0.6.3' dist/*.whl
 
   # The suite against the oldest OpenTelemetry train the package metadata allows.
-  # Two tests need newer releases and are excluded here: drop counting needs
-  # BatchSpanProcessor's meter_provider (1.41+), and the pydantic-ai interop
-  # tests need pydantic-ai 2.x, which needs a newer train.
+  # Some tests need newer releases and are excluded here: drop counting needs
+  # BatchSpanProcessor's meter_provider (1.41+), the pydantic-ai interop tests
+  # need pydantic-ai 2.x, which needs a newer train, and the Temporal tests run
+  # in floor-temporal. pydantic 2.0.2 is the oldest 2.x with a Linux 3.12 wheel.
   floor:
     runs-on: ubuntu-latest
     defaults:
@@ -72,16 +73,76 @@ jobs:
         run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
       - name: Install at the floor
         run: |
-          uv venv .venv-floor
+          uv venv --python 3.12 .venv-floor
           uv pip install --python .venv-floor --no-deps .
           uv pip install --python .venv-floor pytest \
             "opentelemetry-api==1.25.0" \
             "opentelemetry-sdk==1.25.0" \
             "opentelemetry-exporter-otlp-proto-http==1.25.0" \
             "opentelemetry-instrumentation==0.46b0" \
-            "zstandard==0.22.0"
+            "zstandard==0.22.0" \
+            "pydantic==2.0.2"
       - name: Run the suite at the floor
         run: |
           .venv-floor/bin/python -m pytest tests \
             --ignore tests/test_sdk_transport.py \
+            --ignore tests/test_sdk_temporal.py \
+            --ignore tests/test_sdk_temporal_sandbox.py \
             --deselect tests/test_sdk_destinations.py::test_flush_reports_the_spans_a_full_queue_threw_away
+
+  # The Temporal tests at the `temporal` extra's floor, installed from the
+  # extra: temporalio[opentelemetry] 1.34.0 needs opentelemetry-sdk 1.26+.
+  # Packages not named here resolve to their newest release. The pydantic-ai
+  # cases need OpenTelemetry 1.28+ and run in floor-temporal-pydantic-ai. The
+  # tests download the Temporal dev server at run time, as in the python job.
+  floor-temporal:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install uv
+        run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+      - name: Install at the Temporal floor
+        run: |
+          uv venv --python 3.12 .venv-floor
+          uv pip install --python .venv-floor ".[temporal]" pytest \
+            "opentelemetry-api==1.26.0" \
+            "opentelemetry-sdk==1.26.0" \
+            "opentelemetry-exporter-otlp-proto-http==1.26.0" \
+            "temporalio[opentelemetry]==1.34.0"
+      - name: Run the Temporal tests at the floor
+        run: |
+          .venv-floor/bin/python -m pytest -m "not pydantic_ai" \
+            tests/test_sdk_temporal.py \
+            tests/test_sdk_temporal_sandbox.py
+
+  # The pydantic-ai hand-off cases at the oldest versions that work together:
+  # pydantic-ai needs opentelemetry-api 1.28+, and its Temporal integration
+  # fails to import on temporalio 1.34 before pydantic-ai-slim 2.53.0.
+  floor-temporal-pydantic-ai:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install uv
+        run: curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+      - name: Install at the pydantic-ai floor
+        run: |
+          uv venv --python 3.12 .venv-floor
+          uv pip install --python .venv-floor ".[temporal]" pytest \
+            "opentelemetry-api==1.28.0" \
+            "opentelemetry-sdk==1.28.0" \
+            "opentelemetry-exporter-otlp-proto-http==1.28.0" \
+            "temporalio[opentelemetry]==1.34.0" \
+            "pydantic-ai-slim==2.53.0"
+      - name: Run the pydantic-ai Temporal tests at the floor
+        run: |
+          .venv-floor/bin/python -m pytest -m pydantic_ai tests/test_sdk_temporal.py

@@ -29,6 +29,23 @@ import {
   type Marks,
 } from "./filters.js";
 import type { ConvergentProcessor } from "./processor.js";
+import {
+  CONVERGENT_AGENT_SYSTEM_INSTRUCTIONS,
+  CONVERGENT_AGENT_TOOLS,
+  CONVERGENT_CONTENT_SOURCE,
+  GEN_AI_AGENT_NAME,
+  GEN_AI_AGENT_VERSION,
+  GEN_AI_INPUT_MESSAGES,
+  GEN_AI_OPERATION_NAME,
+  GEN_AI_OUTPUT_MESSAGES,
+  GEN_AI_REQUEST_MODEL,
+  GEN_AI_TOOL_CALL_ARGUMENTS,
+  GEN_AI_TOOL_CALL_ID,
+  GEN_AI_TOOL_CALL_RESULT,
+  GEN_AI_TOOL_NAME,
+  GEN_AI_TOOL_TYPE,
+  OPERATIONS,
+} from "./telemetry-keys.js";
 
 export interface SpanOptions {
   name: string;
@@ -85,7 +102,38 @@ const noopHandle: SpanHandle = {
   outputArtifact() {},
 };
 
-const openedSpans = new WeakMap<Span, { operation: string; scope: Marks }>();
+// `output` is what setOutput() recorded, held until the callback returns and
+// written only when it succeeds.
+const openedSpans = new WeakMap<Span, { operation: string; scope: Marks; output?: Attributes }>();
+
+const nameLimit = 128;
+const knownOperations: ReadonlySet<string> = new Set([
+  ...operations.keys(),
+  ...operations.values(),
+]);
+
+// The span is still recorded: ingest rejects a bad name, where it costs the caller nothing.
+// The messages leave out the caller's value, as every other diagnostic here does.
+function reportInvalid(name: unknown, operation: unknown): void {
+  // Characters, not UTF-16 units, matching Python's len(). A string never has more
+  // characters than units, so a short name skips the count.
+  if (
+    typeof name !== "string" ||
+    !name.trim() ||
+    (name.length > nameLimit && Array.from(name).length > nameLimit)
+  ) {
+    reportOnce(
+      "invalid_name",
+      `Convergent recorded a span with an unusable name. A name must be 1-${nameLimit} characters; ingest will reject this one. The span was still sent.`,
+    );
+  }
+  if (typeof operation !== "string" || !knownOperations.has(operation)) {
+    reportOnce(
+      "invalid_operation",
+      `Convergent recorded a span with an unrecognized operation. It is stored as given but will not map to a first-class concept. Known operations: ${[...operations.keys()].join(", ")}.`,
+    );
+  }
+}
 
 function safelyRecord(callback: () => void): void {
   try {
@@ -181,24 +229,36 @@ class RecordingSpanHandle implements SpanHandle {
         );
         return;
       }
-      this.current.setAttribute("gen_ai.tool.call.id", id);
+      this.current.setAttribute(GEN_AI_TOOL_CALL_ID, id);
     });
   }
 
   private setContent(direction: "input" | "output", value: unknown): void {
     safelyRecord(() => {
       if (!this.current.isRecording()) return;
-      if (this.operation === "execute_tool") {
-        const key =
-          direction === "input" ? "gen_ai.tool.call.arguments" : "gen_ai.tool.call.result";
-        this.current.setAttribute(key, text(value));
+      const toolCall = this.operation === OPERATIONS.tool_call;
+      const encoded = toolCall
+        ? text(value)
+        : messages(direction === "input" ? "user" : "assistant", value);
+      const opened = openedSpans.get(this.current);
+      if (encoded === undefined) {
+        // A dropped final answer must not leave an earlier partial one to ship.
+        if (direction === "output" && opened) delete opened.output;
         return;
       }
-      this.current.setAttribute(
-        `gen_ai.${direction}.messages`,
-        messages(direction === "input" ? "user" : "assistant", value),
-      );
-      this.current.setAttribute("convergent.content.source", "sdk");
+      const content: Attributes = toolCall
+        ? {
+            [direction === "input" ? GEN_AI_TOOL_CALL_ARGUMENTS : GEN_AI_TOOL_CALL_RESULT]: encoded,
+          }
+        : {
+            [direction === "input" ? GEN_AI_INPUT_MESSAGES : GEN_AI_OUTPUT_MESSAGES]: encoded,
+            // Same literal as the Python SDK's _semantic.py and ingest's otel_span_mapper.py; change all three.
+            [CONVERGENT_CONTENT_SOURCE]: "sdk",
+          };
+      // A span this SDK opened holds its output until the callback succeeds.
+      // Another library's span ends where this SDK cannot see, so it is written now.
+      if (direction === "output" && opened) opened.output = content;
+      else this.current.setAttributes(content);
     });
   }
 }
@@ -206,21 +266,29 @@ class RecordingSpanHandle implements SpanHandle {
 function attributesFor(options: SpanOptions, operation: string, release: string): Attributes {
   // First, so OpenTelemetry's attribute count limit drops caller attributes before it.
   const attributes: Attributes = {
-    "gen_ai.operation.name": operation,
+    [GEN_AI_OPERATION_NAME]: operation,
     ...customAttributes(options.attributes),
   };
-  if (options.model !== undefined) attributes["gen_ai.request.model"] = options.model;
-  if (operation === "invoke_agent") {
-    attributes["gen_ai.agent.name"] = options.name;
-    attributes["gen_ai.agent.version"] = release;
+  if (typeof options.model === "string" && !options.model.trim()) {
+    reportOnce(
+      "empty_model",
+      "Convergent ignored an empty model name. Pass the model's name, or leave model out.",
+    );
+  } else if (options.model !== undefined) {
+    attributes[GEN_AI_REQUEST_MODEL] = options.model;
+  }
+  if (operation === OPERATIONS.agent_run) {
+    attributes[GEN_AI_AGENT_NAME] = options.name;
+    attributes[GEN_AI_AGENT_VERSION] = release;
     if (options.systemInstructions !== undefined) {
-      attributes["convergent.agent.system_instructions"] = options.systemInstructions;
+      attributes[CONVERGENT_AGENT_SYSTEM_INSTRUCTIONS] = options.systemInstructions;
     }
-    if (options.tools !== undefined) attributes["convergent.agent.tools"] = json(options.tools);
+    const tools = options.tools === undefined ? undefined : json(options.tools);
+    if (tools !== undefined) attributes[CONVERGENT_AGENT_TOOLS] = tools;
   } else {
-    if (operation === "execute_tool") {
-      attributes["gen_ai.tool.name"] = options.name;
-      attributes["gen_ai.tool.type"] ??= "function";
+    if (operation === OPERATIONS.tool_call) {
+      attributes[GEN_AI_TOOL_NAME] = options.name;
+      attributes[GEN_AI_TOOL_TYPE] ??= "function";
     }
     if (options.systemInstructions !== undefined || options.tools !== undefined) {
       reportOnce(
@@ -234,11 +302,22 @@ function attributesFor(options: SpanOptions, operation: string, release: string)
 
 function recordError(current: Span, error: unknown): void {
   safelyRecord(() => {
+    // An aborted call was stopped by its caller, not failed, so its status stays
+    // unset. Matched by name, since the class varies by runtime.
+    if ((error as { name?: unknown } | null)?.name === "AbortError") return;
     current.setStatus({
       code: SpanStatusCode.ERROR,
       ...(error instanceof Error ? { message: error.name } : {}),
     });
   });
+}
+
+// The held output is written only when the call succeeded. A failed or aborted
+// call drops it, so a partial answer never ships as the result.
+function end(current: Span, succeeded: boolean): void {
+  const output = openedSpans.get(current)?.output;
+  if (succeeded && output) safelyRecord(() => current.setAttributes(output));
+  safelyRecord(() => current.end());
 }
 
 function runCallback<T>(current: Span, handle: SpanHandle, callback: (handle: SpanHandle) => T): T {
@@ -247,19 +326,19 @@ function runCallback<T>(current: Span, handle: SpanHandle, callback: (handle: Sp
     result = callback(handle);
   } catch (error) {
     recordError(current, error);
-    safelyRecord(() => current.end());
+    end(current, false);
     throw error;
   }
   if (types.isPromise(result)) {
     try {
       return result.then(
         (value: unknown) => {
-          safelyRecord(() => current.end());
+          end(current, true);
           return value;
         },
         (error: unknown) => {
           recordError(current, error);
-          safelyRecord(() => current.end());
+          end(current, false);
           throw error;
         },
       ) as T;
@@ -267,11 +346,12 @@ function runCallback<T>(current: Span, handle: SpanHandle, callback: (handle: Sp
       reportOnce("promise_tracking", "Convergent could not track the returned Promise.");
     }
   }
-  safelyRecord(() => current.end());
+  end(current, true);
   return result;
 }
 
 export function span<T>(options: SpanOptions, callback: (handle: SpanHandle) => T): T {
+  reportInvalid(options?.name, options?.operation);
   if (!activeConfiguration()) return callback(noopHandle);
   // A resolver belongs on a wrapped function, which has arguments to give it,
   // so a function here is unresolved.
@@ -305,7 +385,7 @@ function record<T>(
     }
     const operation = operations.get(options.operation) ?? options.operation;
     const name =
-      operation === "invoke_agent" || operation === "execute_tool"
+      operation === OPERATIONS.agent_run || operation === OPERATIONS.tool_call
         ? `${operation} ${options.name}`
         : options.name;
     const scoped = withRequestScope(context.active(), update);
@@ -343,7 +423,7 @@ function record<T>(
 // does not promise it. Without an operation, content goes to message keys.
 function publicOperation(current: Span): string {
   const value = (current as Span & { readonly attributes?: Attributes }).attributes?.[
-    "gen_ai.operation.name"
+    GEN_AI_OPERATION_NAME
   ];
   return typeof value === "string" ? value : "";
 }
@@ -380,6 +460,8 @@ export function observe<This, Args extends unknown[], Result>(
   options: ObserveOptions<Args>,
   callback: (this: This, ...args: Args) => Result,
 ): (this: This, ...args: Args) => Result {
+  // Checked once, when the function is wrapped, as Python's decorator does.
+  reportInvalid(options?.name, options?.operation);
   return function (this: This, ...args: Args): Result {
     // Resolved only while tracing is configured, so a disabled SDK never runs the resolver.
     if (!activeConfiguration()) return callback.apply(this, args);

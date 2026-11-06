@@ -3,28 +3,30 @@
 from __future__ import annotations
 
 import logging
-import threading
-import time
+import tomllib
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from importlib.metadata import PackageNotFoundError, distribution
+from pathlib import Path
 from typing import Any, NamedTuple
 
 import pytest
 from opentelemetry import trace
+from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.context import Context
-from opentelemetry.instrumentation.utils import is_instrumentation_enabled
-from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor, TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, Span, SpanLimits, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.sdk.util import BoundedList
+from opentelemetry.trace import format_span_id
 
 import convergent
 import convergent.otel
 from convergent.otel import ConvergentSpanProcessor
-from convergent import _core, _otel, _processors, _registry, _transport
+from convergent import _core, _otel, _processors, _transport, _version
 
 KEY = "test-key"  # pragma: allowlist secret
 ENDPOINT = "https://example.test"
-DEPLOYMENTS = f"{ENDPOINT}/v1/deployments"
 
 
 class Installed(NamedTuple):
@@ -37,11 +39,6 @@ def reset_sdk() -> Iterator[None]:
     _reset_otel()
     _core._reset_for_tests()
     yield
-    # Registration runs on a thread of its own, so a test that ends while one is in
-    # flight would otherwise leave it to land inside the next test, against that
-    # test's monkeypatched registry.
-    for processor in list(_otel._instances):
-        _join_registration(processor)
     _core._reset_for_tests()
     _reset_otel()
 
@@ -72,44 +69,41 @@ def _reset_otel() -> None:
     trace._TRACER_PROVIDER = None  # type: ignore[attr-defined]
 
 
-def _join_registration(processor: ConvergentSpanProcessor, timeout: float = 5.0) -> None:
-    thread = processor._registration
-    if thread is not None:
-        thread.join(timeout=timeout)
-
-
-def _settle(processor: ConvergentSpanProcessor) -> None:
-    """Register the deployment and wait for it, the way the first span starts it."""
-    processor._start_registration()
-    _join_registration(processor)
-    assert processor._registered, "registration did not land"
-
-
 def _serve(
     monkeypatch: pytest.MonkeyPatch, exporter: InMemorySpanExporter, *, batch: bool = False
 ) -> None:
-    """Answer registration, and send every export to ``exporter``."""
-    monkeypatch.setattr(
-        _registry, "post_json", lambda *a, **k: {"deployment_id": "dep_test", "is_new": True}
-    )
+    """Send every export to ``exporter``, through the SDK's own Convergent exporter."""
+    convergent_exporter = _transport._LossCountingExporter(exporter, None, None)
     # Only a real BatchSpanProcessor carries the private queue state flush() reads.
-    processor = BatchSpanProcessor(exporter) if batch else SimpleSpanProcessor(exporter)
+    processor = (
+        BatchSpanProcessor(convergent_exporter)
+        if batch
+        else SimpleSpanProcessor(convergent_exporter)
+    )
     monkeypatch.setattr(_transport, "build_processor", lambda **_: processor)
 
 
 def _record(span: ReadableSpan) -> tuple[str, Mapping[str, object]]:
-    """One span as the pair the parity test compares.
-
-    ``convergent.execution.id`` is the span's own trace id, so two runs of the same
-    code never agree on its value. It is replaced by whether it holds that trace id,
-    which is the property the stamp is there for.
-    """
+    """One span as the pair the parity test compares."""
     attributes: dict[str, object] = dict(span.attributes or {})
     context = span.get_span_context()
-    attributes["convergent.execution.id"] = (
-        context is not None
-        and attributes.get("convergent.execution.id") == f"{context.trace_id:032x}"
+    # IDs and microsecond clocks are expected to differ between the two runs;
+    # compare the relationships and the value shapes instead.
+    attributes["convergent.invocation.span_id"] = context is not None and attributes.get(
+        "convergent.invocation.span_id"
+    ) == format_span_id(context.span_id)
+    attributes["convergent.root_invocation.span_id"] = isinstance(
+        attributes.get("convergent.root_invocation.span_id"), str
     )
+    attributes["convergent.parent_invocation.span_id"] = isinstance(
+        attributes.get("convergent.parent_invocation.span_id"), str
+    )
+    for key in (
+        "convergent.invocation.start_time_unix_micros",
+        "convergent.root_invocation.start_time_unix_micros",
+    ):
+        value = attributes.get(key)
+        attributes[key] = isinstance(value, int) and value > 0
     return span.name, attributes
 
 
@@ -173,14 +167,652 @@ def test_a_caller_owned_provider_produces_the_same_spans_as_init(
 
     through_processor = InMemorySpanExporter()
     _serve(monkeypatch, through_processor)
-    _settle(install().processor)
+    install()
     _run_one_agent()
 
     assert expected, "the init() path recorded nothing, so the comparison proves nothing"
-    assert expected[-1][1]["convergent.deployment.id"] == "dep_test"
-    assert expected[-1][1]["convergent.semantic.version"] == "1"
-    assert expected[-1][1]["convergent.execution.id"] is True
     assert [_record(span) for span in through_processor.get_finished_spans()] == expected
+
+
+_STAMP_PREFIXES = (
+    "convergent.invocation.",
+    "convergent.root_invocation.",
+    "convergent.parent_invocation.",
+)
+
+
+#: What a span names when both distributions are installed: convergent-sdk wins.
+_SDK_VERSION = "python/7.7.7"
+
+
+@pytest.fixture
+def pinned_sdk_version(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    installed = {"convergent-sdk": "7.7.7", "convergent": "1.1.1"}
+
+    def fake_version(distribution: str) -> str:
+        if distribution not in installed:
+            raise PackageNotFoundError(distribution)
+        return installed[distribution]
+
+    monkeypatch.setattr(_version, "version", fake_version)
+    _transport._sdk_version_label.cache_clear()
+    yield
+    _transport._sdk_version_label.cache_clear()
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_real_sdk_stamps_sibling_and_nested_invocations_at_start(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """Each span carries its current invocation, root, and parent invocation."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = install(agents=["planner", "researcher"]).provider
+    tracer = provider.get_tracer("convergent.sdk")
+
+    with tracer.start_as_current_span(
+        "planner",
+        attributes={"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "planner"},
+    ):
+        with tracer.start_as_current_span("planner child"):
+            pass
+        with tracer.start_as_current_span("late LangChain chain") as chain:
+            chain.set_attribute("gen_ai.operation.name", "invoke_agent")
+            with tracer.start_as_current_span("late chain child"):
+                pass
+        with tracer.start_as_current_span(
+            "researcher",
+            attributes={
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.agent.name": "researcher",
+            },
+        ):
+            with tracer.start_as_current_span("researcher child"):
+                pass
+        with tracer.start_as_current_span("planner sibling"):
+            pass
+
+    by_name = {span.name: span for span in exporter.get_finished_spans()}
+    assert set(by_name) == {
+        "planner",
+        "planner child",
+        "late LangChain chain",
+        "late chain child",
+        "researcher",
+        "researcher child",
+        "planner sibling",
+    }
+
+    def own_id(name: str) -> str:
+        span_context = by_name[name].get_span_context()
+        assert span_context is not None
+        return format_span_id(span_context.span_id)
+
+    def attrs(name: str) -> Mapping[str, object]:
+        return by_name[name].attributes or {}
+
+    planner_start_ns = by_name["planner"].start_time
+    researcher_start_ns = by_name["researcher"].start_time
+    assert planner_start_ns is not None
+    assert researcher_start_ns is not None
+    planner_start = planner_start_ns // 1_000
+    researcher_start = researcher_start_ns // 1_000
+    planner_spans = (
+        "planner",
+        "planner child",
+        "late LangChain chain",
+        "late chain child",
+        "planner sibling",
+    )
+    for name in planner_spans:
+        assert attrs(name)["convergent.invocation.span_id"] == own_id("planner")
+        assert attrs(name)["convergent.invocation.start_time_unix_micros"] == planner_start
+        assert attrs(name)["convergent.root_invocation.span_id"] == own_id("planner")
+        assert attrs(name)["convergent.root_invocation.start_time_unix_micros"] == planner_start
+        assert "convergent.parent_invocation.span_id" not in attrs(name)
+    for name in by_name:
+        assert "convergent.invocation.stamp_failed" not in attrs(name)
+    assert attrs("researcher")["convergent.invocation.span_id"] == own_id("researcher")
+    assert attrs("researcher")["convergent.invocation.start_time_unix_micros"] == researcher_start
+    assert attrs("researcher")["convergent.root_invocation.span_id"] == own_id("planner")
+    assert attrs("researcher")["convergent.root_invocation.start_time_unix_micros"] == planner_start
+    assert attrs("researcher")["convergent.parent_invocation.span_id"] == own_id("planner")
+    assert attrs("researcher child")["convergent.invocation.span_id"] == own_id("researcher")
+    assert "convergent.parent_invocation.span_id" not in attrs("researcher child")
+    for name in by_name:
+        assert attrs(name)["convergent.sdk.version"] == _SDK_VERSION
+
+
+def test_spans_ingest_links_as_agent_runs_without_an_operation_are_invocations(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """Ingest's linker treats a span that names an agent but sets no operation
+    as an agent run, and so does pydantic-ai's ``agent <name>`` span. Stamps
+    must split trajectories the same way. A span with another operation that
+    also names its agent stays inside the current invocation."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = install().provider
+    tracer = provider.get_tracer("convergent.sdk")
+    framework = provider.get_tracer("some.framework")
+    pydantic_ai = provider.get_tracer("pydantic-ai")
+
+    with tracer.start_as_current_span(
+        "outer", attributes={"gen_ai.operation.name": "invoke_agent"}
+    ):
+        with framework.start_as_current_span(
+            "named agent", attributes={"gen_ai.agent.name": "inner"}
+        ):
+            with framework.start_as_current_span(
+                "model call",
+                attributes={"gen_ai.operation.name": "chat", "gen_ai.agent.name": "inner"},
+            ):
+                pass
+        with pydantic_ai.start_as_current_span(
+            "agent support", attributes={"agent.name": "support"}
+        ):
+            pass
+
+    by_name = {span.name: span for span in exporter.get_finished_spans()}
+
+    def own_id(name: str) -> str:
+        span_context = by_name[name].get_span_context()
+        assert span_context is not None
+        return format_span_id(span_context.span_id)
+
+    def attrs(name: str) -> Mapping[str, object]:
+        return by_name[name].attributes or {}
+
+    for name in ("named agent", "agent support"):
+        assert attrs(name)["convergent.invocation.span_id"] == own_id(name)
+        assert attrs(name)["convergent.parent_invocation.span_id"] == own_id("outer")
+        assert attrs(name)["convergent.root_invocation.span_id"] == own_id("outer")
+    assert attrs("model call")["convergent.invocation.span_id"] == own_id("named agent")
+
+
+def test_other_instrumentors_agent_markings_start_no_invocation(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """Ingest's canonical path reads neither OpenInference's span kinds nor
+    OpenLLMetry's, so a span marked as an agent by either stays inside the
+    current invocation, as ingest places it."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = install().provider
+    tracer = provider.get_tracer("convergent.sdk")
+    framework = provider.get_tracer("some.framework")
+
+    with tracer.start_as_current_span(
+        "outer", attributes={"gen_ai.operation.name": "invoke_agent"}
+    ):
+        for name, attributes in (
+            ("openinference agent", {"openinference.span.kind": "AGENT"}),
+            ("openinference chain", {"openinference.span.kind": "CHAIN"}),
+            ("traceloop agent", {"traceloop.span.kind": "agent"}),
+            ("traceloop entity", {"traceloop.entity.name": "support"}),
+        ):
+            with framework.start_as_current_span(name, attributes=attributes):
+                pass
+
+    by_name = {span.name: span for span in exporter.get_finished_spans()}
+    outer = by_name["outer"].get_span_context()
+    assert outer is not None
+    outer_id = format_span_id(outer.span_id)
+    for name in (
+        "openinference agent",
+        "openinference chain",
+        "traceloop agent",
+        "traceloop entity",
+    ):
+        attributes = by_name[name].attributes or {}
+        assert attributes["convergent.invocation.span_id"] == outer_id, name
+        assert "convergent.parent_invocation.span_id" not in attributes, name
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_spans_under_a_remote_parent_without_a_received_stamp_stay_unstamped(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """A caller on an older SDK, another language, or a hop that drops
+    ``tracestate`` sends no stamp. The receiving agent cannot know where it sits
+    in the caller's trajectory, so its whole subtree is left for ingest to link."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = install().provider
+    tracer = provider.get_tracer("convergent.sdk")
+    remote = trace.NonRecordingSpan(
+        trace.SpanContext(
+            trace_id=0x0AF7651916CD43DD8448EB211C80319C,
+            span_id=0xB7AD6B7169203331,
+            is_remote=True,
+            trace_flags=trace.TraceFlags(trace.TraceFlags.SAMPLED),
+        )
+    )
+
+    with tracer.start_as_current_span(
+        "receiving agent",
+        context=trace.set_span_in_context(remote),
+        attributes={"gen_ai.operation.name": "invoke_agent"},
+    ):
+        with tracer.start_as_current_span("child"):
+            pass
+        with tracer.start_as_current_span(
+            "nested agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+        ):
+            with tracer.start_as_current_span("nested child"):
+                pass
+
+    spans = exporter.get_finished_spans()
+    assert {span.name for span in spans} == {
+        "receiving agent",
+        "child",
+        "nested agent",
+        "nested child",
+    }
+    for span in spans:
+        assert not [key for key in span.attributes or {} if key.startswith(_STAMP_PREFIXES)], (
+            span.name
+        )
+        assert (span.attributes or {})["convergent.sdk.version"] == _SDK_VERSION, span.name
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_spans_under_a_local_parent_started_before_install_stay_unstamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent already running when ``install`` attaches to the caller's provider
+    never passed through the stamper, so where its children sit is as unknown as
+    under a remote parent. A span started after install with no agent above it is
+    still a known root."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    provider = TracerProvider()
+    tracer = provider.get_tracer("customer")
+    try:
+        with tracer.start_as_current_span(
+            "early agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+        ):
+            convergent.otel.install(provider, api_key=KEY, endpoint=ENDPOINT, release="r1")
+            with tracer.start_as_current_span(
+                "nested agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+            ):
+                with tracer.start_as_current_span("nested child"):
+                    pass
+        with tracer.start_as_current_span("request"):
+            with tracer.start_as_current_span(
+                "later agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+            ):
+                pass
+    finally:
+        provider.shutdown()
+
+    by_name = {span.name: span for span in exporter.get_finished_spans()}
+    for name in ("early agent", "nested agent", "nested child", "request"):
+        attributes = by_name[name].attributes or {}
+        assert not [key for key in attributes if key.startswith(_STAMP_PREFIXES)], name
+    later = by_name["later agent"]
+    later_context = later.get_span_context()
+    assert later_context is not None
+    attributes = later.attributes or {}
+    assert attributes["convergent.root_invocation.span_id"] == format_span_id(later_context.span_id)
+    assert "convergent.parent_invocation.span_id" not in attributes
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_a_span_with_no_agent_above_it_names_the_sdk_without_a_stamp(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """Ingest files a leftover span under its trace's run only when it can tell
+    the span came from a stamping SDK, so every exported span names the SDK."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    tracer = install().provider.get_tracer("convergent.sdk")
+
+    with tracer.start_as_current_span("request"):
+        with tracer.start_as_current_span("db query"):
+            pass
+
+    spans = exporter.get_finished_spans()
+    assert {span.name for span in spans} == {"request", "db query"}
+    for span in spans:
+        attributes = span.attributes or {}
+        assert not [key for key in attributes if key.startswith(_STAMP_PREFIXES)], span.name
+        assert attributes["convergent.sdk.version"] == _SDK_VERSION, span.name
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_every_span_sent_to_convergent_names_the_sdk(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """Catches an export path that stops adding the version, or adds it only to
+    stamped spans: ingest tells a stamping SDK's spans apart by this key, so a
+    span without it is filed as if an old SDK sent it."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    tracer = install().provider.get_tracer("convergent.sdk")
+
+    with tracer.start_as_current_span(
+        "agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+    ):
+        with tracer.start_as_current_span("tool"):
+            pass
+    with tracer.start_as_current_span("no agent above"):
+        pass
+
+    spans = {span.name: span.attributes or {} for span in exporter.get_finished_spans()}
+    assert set(spans) == {"agent", "tool", "no agent above"}
+    for name, attributes in spans.items():
+        assert attributes["convergent.sdk.version"] == _SDK_VERSION, name
+    for name in ("agent", "tool"):
+        assert "convergent.invocation.span_id" in spans[name], name
+
+
+def test_every_exported_span_names_the_python_sdk_that_is_installed(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """Catches a wrong or missing ``python/`` version on the real lookup, unpinned.
+
+    The expected version is the installed version of the distribution this
+    checkout's ``pyproject.toml`` names, not what the SDK's own lookup answers,
+    so the test cannot pass by the SDK repeating its own mistake (edge case 17:
+    in the monorepo that is the checkout's dev version, which no shared scenario
+    lists).
+    """
+    # The nearest pyproject.toml: the repo root in the monorepo, ``python/`` in
+    # the public SDK copy, where these tests sit one level lower.
+    pyproject = next(
+        parent / "pyproject.toml"
+        for parent in Path(__file__).resolve().parents
+        if (parent / "pyproject.toml").is_file()
+    )
+    project = tomllib.loads(pyproject.read_text())["project"]["name"]
+    expected = f"python/{distribution(project).version}"
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    tracer = install().provider.get_tracer("convergent.sdk")
+
+    _transport._sdk_version_label.cache_clear()
+    try:
+        _run_one_agent()
+        with tracer.start_as_current_span("no agent above"):
+            pass
+    finally:
+        _transport._sdk_version_label.cache_clear()
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 3
+    for span in spans:
+        assert (span.attributes or {})["convergent.sdk.version"] == expected, span.name
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_a_customer_exporter_on_the_same_provider_never_sees_the_sdk_version(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """Catches the version going back onto the shared span object, where every
+    exporter the customer attached to the provider would ship it too."""
+    ours = InMemorySpanExporter()
+    _serve(monkeypatch, ours)
+    provider = install().provider
+    theirs = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(theirs))
+    tracer = provider.get_tracer("convergent.sdk")
+
+    with tracer.start_as_current_span(
+        "agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+    ):
+        with tracer.start_as_current_span("tool"):
+            pass
+
+    assert {span.name for span in ours.get_finished_spans()} == {"agent", "tool"}
+    for span in ours.get_finished_spans():
+        assert (span.attributes or {})["convergent.sdk.version"] == _SDK_VERSION, span.name
+    assert {span.name for span in theirs.get_finished_spans()} == {"agent", "tool"}
+    for span in theirs.get_finished_spans():
+        assert "convergent.sdk.version" not in (span.attributes or {}), span.name
+        assert "convergent.invocation.span_id" in (span.attributes or {}), span.name
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_a_span_at_the_attribute_limit_still_names_the_sdk_on_export(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a version that is added only when it fits under the span
+    attribute limit, or that evicts one of the caller's attributes to fit."""
+    ours = InMemorySpanExporter()
+    _serve(monkeypatch, ours)
+    provider = TracerProvider(span_limits=SpanLimits(max_attributes=2))
+    convergent.otel.install(provider, api_key=KEY, endpoint=ENDPOINT, release="r1")
+    theirs = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(theirs))
+    tracer = provider.get_tracer("convergent.sdk")
+
+    with tracer.start_as_current_span("full", attributes={"a": 1, "b": 2}):
+        pass
+
+    (sent,) = ours.get_finished_spans()
+    assert dict(sent.attributes or {}) == {"a": 1, "b": 2, "convergent.sdk.version": _SDK_VERSION}
+    (shared,) = theirs.get_finished_spans()
+    assert dict(shared.attributes or {}) == {"a": 1, "b": 2}
+    provider.shutdown()
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_a_stamp_pushed_out_after_start_is_written_back_on_export(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """Catches a span that fills the attribute limit after it starts, such as a
+    model span flattening its messages: OpenTelemetry evicts the oldest keys,
+    the stamp among them, while the export copy still names the SDK, so ingest
+    would take the span for a stamping SDK's span that has no stamp."""
+    exporter = InMemorySpanExporter()
+    _serve(monkeypatch, exporter)
+    tracer = install().provider.get_tracer("convergent.sdk")
+
+    with tracer.start_as_current_span(
+        "agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+    ) as agent:
+        with tracer.start_as_current_span("model") as model:
+            for index in range(200):
+                model.set_attribute(f"llm.input_messages.{index}.content", "x")
+        for index in range(200):
+            agent.set_attribute(f"llm.output_messages.{index}.content", "y")
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    assert set(spans) == {"agent", "model"}
+    agent_context = spans["agent"].context
+    assert agent_context is not None
+    agent_id = format_span_id(agent_context.span_id)
+    agent_start = (spans["agent"].start_time or 0) // 1_000
+    expected = {
+        "convergent.invocation.span_id": agent_id,
+        "convergent.invocation.start_time_unix_micros": agent_start,
+        "convergent.root_invocation.span_id": agent_id,
+        "convergent.root_invocation.start_time_unix_micros": agent_start,
+    }
+    for name, span in spans.items():
+        attributes = span.attributes or {}
+        assert span.dropped_attributes > 0, name
+        assert {key: attributes.get(key) for key in expected} == expected, name
+        assert "convergent.parent_invocation.span_id" not in attributes, name
+        assert "convergent.invocation.stamp_failed" not in attributes, name
+        assert attributes["convergent.sdk.version"] == _SDK_VERSION, name
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_a_span_too_full_for_its_stamp_still_carries_it_on_export() -> None:
+    """Catches a span that starts too full for its stamp failing itself and its
+    subtree. With 125 attributes under the default limit of 128, the four stamp
+    keys do not fit, so only the write to the shared span is skipped: the span
+    keeps every caller attribute, and the export copy, which has no limit,
+    carries the stamp for the span and its child.
+
+    Only the stampers run, so the span holds exactly its start attributes.
+    """
+    ours, theirs = InMemorySpanExporter(), InMemorySpanExporter()
+    provider = TracerProvider()
+    convergent_export = SimpleSpanProcessor(_transport._LossCountingExporter(ours, None, None))
+    for processor in [_processors._STAMPER, *_processors.wrap(None, None, (convergent_export,))]:
+        provider.add_span_processor(processor)
+    provider.add_span_processor(SimpleSpanProcessor(theirs))
+    tracer = provider.get_tracer("convergent.sdk")
+    start = {"gen_ai.operation.name": "invoke_agent"} | {f"caller.{i}": i for i in range(124)}
+
+    with tracer.start_as_current_span("full agent", attributes=start):
+        with tracer.start_as_current_span("child"):
+            pass
+
+    shared = {span.name: dict(span.attributes or {}) for span in theirs.get_finished_spans()}
+    assert shared["full agent"] == start
+    sent = {span.name: span for span in ours.get_finished_spans()}
+    assert set(sent) == {"full agent", "child"}
+    agent_context = sent["full agent"].context
+    assert agent_context is not None
+    agent_id = format_span_id(agent_context.span_id)
+    agent_start = (sent["full agent"].start_time or 0) // 1_000
+    expected = {
+        "convergent.invocation.span_id": agent_id,
+        "convergent.invocation.start_time_unix_micros": agent_start,
+        "convergent.root_invocation.span_id": agent_id,
+        "convergent.root_invocation.start_time_unix_micros": agent_start,
+    }
+    for name, span in sent.items():
+        attributes = dict(span.attributes or {})
+        stamp = {key: value for key, value in attributes.items() if key.startswith(_STAMP_PREFIXES)}
+        assert stamp == expected, name
+        assert attributes["convergent.sdk.version"] == _SDK_VERSION, name
+    assert start.items() <= dict(sent["full agent"].attributes or {}).items()
+    provider.shutdown()
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_a_failed_stamp_with_no_room_for_its_flag_is_flagged_on_export(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a failed stamp whose flag did not fit under the limit: without the
+    flag, the export copy names the SDK and ingest files the span as unstamped.
+
+    Only the stampers run, so the span holds exactly its two start attributes;
+    the SDK's semantic keys would otherwise evict the operation first. A full
+    span alone no longer fails, so the stamper is made to raise.
+
+    Also catches a failed stamp dropping its child, or stamping it: every span
+    still exports, with no stamp on the children.
+    """
+
+    def broken(span: Span) -> bool:
+        raise RuntimeError("stamper failed")
+
+    monkeypatch.setattr(_processors, "_is_invocation", broken)
+    ours, theirs = InMemorySpanExporter(), InMemorySpanExporter()
+    provider = TracerProvider(span_limits=SpanLimits(max_attributes=2))
+    convergent_export = SimpleSpanProcessor(_transport._LossCountingExporter(ours, None, None))
+    for processor in [_processors._STAMPER, *_processors.wrap(None, None, (convergent_export,))]:
+        provider.add_span_processor(processor)
+    provider.add_span_processor(SimpleSpanProcessor(theirs))
+    tracer = provider.get_tracer("convergent.sdk")
+
+    with tracer.start_as_current_span(
+        "full agent", attributes={"gen_ai.operation.name": "invoke_agent", "a": 1}
+    ):
+        with tracer.start_as_current_span("child"):
+            pass
+
+    shared = {span.name: dict(span.attributes or {}) for span in theirs.get_finished_spans()}
+    assert shared["full agent"] == {"gen_ai.operation.name": "invoke_agent", "a": 1}
+    assert shared["child"] == {"convergent.invocation.stamp_failed": True}
+    sent = {span.name: dict(span.attributes or {}) for span in ours.get_finished_spans()}
+    assert set(sent) == {"full agent", "child"}
+    assert sent["full agent"]["gen_ai.operation.name"] == "invoke_agent"
+    assert sent["full agent"]["a"] == 1
+    for name, attributes in sent.items():
+        assert attributes["convergent.invocation.stamp_failed"] is True, name
+        assert attributes["convergent.sdk.version"] == _SDK_VERSION, name
+        assert not [
+            key
+            for key in attributes
+            if key.startswith(_STAMP_PREFIXES) and key != "convergent.invocation.stamp_failed"
+        ], name
+    provider.shutdown()
+
+
+def test_a_stamp_that_exactly_fills_the_attribute_limit_is_written() -> None:
+    exporter = InMemorySpanExporter()
+    # A root invocation adds four placement keys to its operation.
+    provider = TracerProvider(span_limits=SpanLimits(max_attributes=5))
+    for processor in [_processors._STAMPER, *_processors.wrap(None, None, ())]:
+        provider.add_span_processor(processor)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("convergent.sdk")
+
+    with tracer.start_as_current_span(
+        "agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+    ):
+        pass
+
+    (span,) = exporter.get_finished_spans()
+    attributes = span.attributes or {}
+    assert len(attributes) == 5
+    assert attributes["gen_ai.operation.name"] == "invoke_agent"
+    assert "convergent.invocation.stamp_failed" not in attributes
+    assert (
+        attributes["convergent.root_invocation.span_id"]
+        == attributes["convergent.invocation.span_id"]
+    )
+    provider.shutdown()
+
+
+def test_a_stamp_past_the_attribute_limit_leaves_the_shared_span_alone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stamp that would evict the caller's attributes or context marks is not
+    written to the shared span, and the span is not failed: the export copy
+    carries the stamp instead. Each span here is too full for its stamp."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider(span_limits=SpanLimits(max_attributes=6))
+    for processor in [_processors._STAMPER, *_processors.wrap(None, None, ())]:
+        provider.add_span_processor(processor)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("convergent.sdk")
+
+    with caplog.at_level(logging.WARNING):
+        with _marked(
+            {
+                "customer.id": "cust-1",
+                "tenant.id": "tenant-1",
+                "request.id": "request-1",
+            }
+        ):
+            with tracer.start_as_current_span(
+                "agent",
+                attributes={
+                    "gen_ai.operation.name": "invoke_agent",
+                    "user.id": "user-1",
+                    _processors.CONVERGENT_SESSION_ID: "session-1",
+                },
+            ):
+                with tracer.start_as_current_span("child"):
+                    pass
+            with tracer.start_as_current_span(
+                "roomy agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+            ):
+                pass
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    assert set(spans) == {"agent", "child", "roomy agent"}
+    agent_attributes = spans["agent"].attributes or {}
+    assert agent_attributes["convergent.attributes.customer.id"] == "cust-1"
+    assert agent_attributes["convergent.attributes.tenant.id"] == "tenant-1"
+    assert agent_attributes["convergent.attributes.request.id"] == "request-1"
+    assert agent_attributes["user.id"] == "user-1"
+    assert agent_attributes[_processors.CONVERGENT_SESSION_ID] == "session-1"
+    assert (spans["child"].attributes or {})["convergent.attributes.customer.id"] == "cust-1"
+    roomy_attributes = spans["roomy agent"].attributes or {}
+    assert roomy_attributes["convergent.attributes.customer.id"] == "cust-1"
+    for span in spans.values():
+        assert not [key for key in span.attributes or {} if key.startswith(_STAMP_PREFIXES)]
+    assert not [r for r in caplog.records if "could not stamp trajectory identity" in r.message]
+    provider.shutdown()
 
 
 def test_declared_agents_filter_through_the_processor(
@@ -223,151 +855,6 @@ def test_flush_drains_the_processor_and_reports_its_queue(
     assert result.pending == 0
     assert result.dropped == 0
     assert _names(exporter) == {"invoke_agent support-agent"}
-
-
-# --- registration stays off the span path ------------------------------------
-
-
-def test_spans_before_registration_carry_the_fingerprint_and_later_ones_the_id(
-    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
-) -> None:
-    """No span waits for registration, so the early ones carry the release as a
-    fingerprint. The server resolves that against the same key registration upserts
-    on, so both kinds reach one deployment."""
-    exporter = InMemorySpanExporter()
-    answer = threading.Event()
-
-    def wait_then_answer(*_: object, **__: object) -> dict[str, object]:
-        answer.wait(timeout=5)
-        return {"deployment_id": "dep_test", "is_new": True}
-
-    monkeypatch.setattr(_registry, "post_json", wait_then_answer)
-    monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(exporter))
-    installed = install()
-
-    with convergent.span(name="support-agent", operation="agent_run"):
-        pass
-    early = exporter.get_finished_spans()[-1].attributes or {}
-
-    answer.set()
-    _join_registration(installed.processor)
-
-    with convergent.span(name="support-agent", operation="agent_run"):
-        pass
-    late = exporter.get_finished_spans()[-1].attributes or {}
-
-    assert early["convergent.deployment.fingerprint"] == "r1"
-    assert "convergent.deployment.id" not in early
-    assert late["convergent.deployment.id"] == "dep_test"
-    assert "convergent.deployment.fingerprint" not in late
-    assert _core.live_status().deployment == "dep_test"
-
-
-def test_concurrent_first_spans_do_not_wait_for_registration(
-    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
-) -> None:
-    """Holding a lock across the registration request made every concurrent span
-    start queue behind it, and each one paid the whole request. Nothing on the span
-    path may hold a lock across that call, which is the rule ``init()`` follows."""
-    threads = 32
-    exporter = InMemorySpanExporter()
-    reached = threading.Event()
-    answer = threading.Event()
-
-    def slow(*_: object, **__: object) -> dict[str, object]:
-        reached.set()
-        answer.wait(timeout=5)
-        return {"deployment_id": "dep_test", "is_new": True}
-
-    monkeypatch.setattr(_registry, "post_json", slow)
-    monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(exporter))
-    install()
-
-    barrier = threading.Barrier(threads)
-    waited: list[float] = []
-
-    def record() -> None:
-        barrier.wait(timeout=5)
-        began = time.monotonic()
-        with convergent.span(name="support-agent", operation="agent_run"):
-            pass
-        waited.append(time.monotonic() - began)
-
-    workers = [threading.Thread(target=record) for _ in range(threads)]
-    for worker in workers:
-        worker.start()
-    for worker in workers:
-        worker.join(timeout=10)
-    # The spans are already done, so this waits on the registration thread rather
-    # than the other way round, which is the whole point.
-    started_registration = reached.wait(timeout=5)
-    answer.set()
-
-    assert started_registration, "the first span started the registration"
-    assert len(waited) == threads
-    assert max(waited) < 0.5, f"a span waited {max(waited):.3f}s for registration"
-    assert len(exporter.get_finished_spans()) == threads
-
-
-def test_the_registration_request_records_no_span_and_runs_once(
-    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
-) -> None:
-    """A caller who traces their HTTP client must not get a span for our own
-    registration request. Our processor would then be handed that span, which under
-    ``agents=None`` means exporting a request that carries our Authorization header.
-    The request runs with instrumentation suppressed, which is what every
-    instrumentation library reads before it starts a span."""
-    exporter = InMemorySpanExporter()
-    posts: list[str] = []
-
-    def instrumented_post(url: str, *_: object, **__: object) -> dict[str, object]:
-        posts.append(url)
-        if is_instrumentation_enabled():
-            tracer = trace.get_tracer_provider().get_tracer("their.http")
-            with tracer.start_as_current_span("POST /v1/deployments"):
-                pass
-        return {"deployment_id": "dep_test", "is_new": True}
-
-    monkeypatch.setattr(_registry, "post_json", instrumented_post)
-    monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(exporter))
-    _settle(install().processor)
-
-    with convergent.span(name="support-agent", operation="agent_run"):
-        pass
-
-    assert posts == [DEPLOYMENTS], "one registration, and no request about a request"
-    assert _names(exporter) == {"invoke_agent support-agent"}
-
-
-def test_a_failed_registration_never_raises_and_is_not_tried_again(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    install: Callable[..., Installed],
-) -> None:
-    """Construction reaches nobody, so it cannot fail on a box with no route out.
-    A control plane that is down costs one request, not one per span, and every
-    span keeps the fingerprint it already carried."""
-    exporter = InMemorySpanExporter()
-    posts: list[str] = []
-
-    def refuse(url: str, *_: object, **__: object) -> dict[str, object]:
-        posts.append(url)
-        raise _registry.RegistrationError("URLError")
-
-    monkeypatch.setattr(_registry, "post_json", refuse)
-    monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(exporter))
-    with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
-        installed = install()
-        assert not caplog.records, "construction makes no network call"
-        _run_one_agent()
-        _join_registration(installed.processor)
-        _run_one_agent()
-
-    attributes = exporter.get_finished_spans()[-1].attributes or {}
-    assert attributes["convergent.deployment.fingerprint"] == "r1"
-    assert "convergent.deployment.id" not in attributes
-    assert posts == [DEPLOYMENTS]
-    assert len([r for r in caplog.records if "registration failed" in r.message]) == 1
 
 
 # --- one configuration per process -------------------------------------------
@@ -434,16 +921,8 @@ def test_a_second_processor_sends_nothing_even_with_the_same_settings(
     """Two processors with identical settings used to export every span twice, and
     said nothing about it."""
     first = InMemorySpanExporter()
-    posts: list[str] = []
-
-    def count(url: str, *_: object, **__: object) -> dict[str, object]:
-        posts.append(url)
-        return {"deployment_id": "dep_test", "is_new": True}
-
-    monkeypatch.setattr(_registry, "post_json", count)
     monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(first))
     installed = install()
-    _settle(installed.processor)
 
     second = InMemorySpanExporter()
     monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(second))
@@ -455,7 +934,6 @@ def test_a_second_processor_sends_nothing_even_with_the_same_settings(
 
     assert len(first.get_finished_spans()) == 1, "one span out, not two"
     assert second.get_finished_spans() == ()
-    assert posts == [DEPLOYMENTS], "and one registration"
     assert [r for r in caplog.records if "sends nothing" in r.message]
 
 
@@ -467,15 +945,8 @@ def test_init_after_a_processor_keeps_the_processors_configuration(
     """The other order. ``init()`` is the one that loses, and the processor's
     setup keeps running."""
     exporter = InMemorySpanExporter()
-    posts: list[str] = []
-
-    def count(url: str, *_: object, **__: object) -> dict[str, object]:
-        posts.append(url)
-        return {"deployment_id": "dep_test", "is_new": True}
-
-    monkeypatch.setattr(_registry, "post_json", count)
     monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(exporter))
-    _settle(install().processor)
+    install()
 
     with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
         status = convergent.init(api_key=KEY, endpoint=ENDPOINT, release="r1")
@@ -485,7 +956,6 @@ def test_init_after_a_processor_keeps_the_processors_configuration(
 
     assert status.mode == "attached"
     assert len(exporter.get_finished_spans()) == 1, "one span out, not two"
-    assert posts == [DEPLOYMENTS], "and one registration"
     assert [r for r in caplog.records if "already configured" in r.message]
 
 
@@ -575,34 +1045,6 @@ def test_a_provider_installed_globally_after_the_processor_is_found(
     assert _names(exporter) == {"invoke_agent support-agent"}
     assert _core.live_status().reason is None
     assert not [r for r in caplog.records if "cannot find the tracer provider" in r.message]
-
-
-def test_the_deployment_is_registered_once_however_many_spans_run(
-    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
-) -> None:
-    posts: list[str] = []
-
-    def count(url: str, *_: object, **__: object) -> dict[str, object]:
-        posts.append(url)
-        return {"deployment_id": "dep_test", "is_new": True}
-
-    monkeypatch.setattr(_registry, "post_json", count)
-    monkeypatch.setattr(
-        _transport, "build_processor", lambda **_: SimpleSpanProcessor(InMemorySpanExporter())
-    )
-    installed = install()
-    assert posts == [], "construction makes no network call"
-
-    _run_one_agent()
-    _join_registration(installed.processor)
-    _run_one_agent()
-    convergent.flush()
-
-    assert posts == [DEPLOYMENTS]
-    status = _core.live_status()
-    assert status.deployment == "dep_test"
-    assert status.mode == "attached"
-    assert status.destinations == ["convergent"]
 
 
 def test_two_lost_processors_warn_once_each(
@@ -736,29 +1178,6 @@ def test_install_add_failure_removes_the_exporter_with_declared_agents(
     assert len(_core._drain) == 0, "the raw exporter is removed from the drain"
 
 
-def test_first_flush_starts_registration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A short-lived process that flushes before any span still resolves its
-    deployment identity, because flush() triggers the same lazy registration that
-    the first span does."""
-    _serve(monkeypatch, InMemorySpanExporter())
-    started: list[bool] = []
-    monkeypatch.setattr(
-        ConvergentSpanProcessor,
-        "_start_registration",
-        lambda self: started.append(True),
-    )
-
-    provider = TracerProvider()
-    convergent.otel.install(provider, api_key=KEY, endpoint=ENDPOINT, release="r1")
-    trace.set_tracer_provider(provider)
-
-    assert started == [], "construction does not start registration"
-    convergent.flush()
-    assert started == [True], "the first flush starts registration"
-
-
 def test__carries_finds_processor_inside_a_composite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -866,7 +1285,6 @@ def test_require_filters_through_a_processor_added_by_hand(
 
         assert _names(exporter) == {"acme request"}
     finally:
-        _join_registration(processor)
         provider.shutdown()
 
 
@@ -937,7 +1355,6 @@ def test_reject_filters_through_a_processor_added_by_hand(
 
         assert _names(exporter) == {"unmarked request"}
     finally:
-        _join_registration(processor)
         provider.shutdown()
 
 
@@ -1005,3 +1422,54 @@ def test_a_malformed_reject_through_a_processor_disables_with_strict_off(
     assert _names(exporter) == set()
     assert _core.live_status().enabled is False
     assert [r for r in caplog.records if "cannot work" in r.message]
+
+
+def test_the_opentelemetry_private_span_fields_the_sdk_reads_exist() -> None:
+    """The stamp's write-back (``_processors.trajectory_stamp``, ``_fits``) and the
+    export copy (``_transport._naming_the_sdk``) read OpenTelemetry's private span
+    fields. A release that renames one would turn them into silent no-ops, so this
+    fails first."""
+    provider = TracerProvider()
+    span = provider.get_tracer("their.app").start_span("step")
+    assert isinstance(span, Span)
+    attributes = span._attributes
+    assert isinstance(attributes, BoundedAttributes)
+    assert isinstance(attributes.maxlen, int)
+    _processors._keep_for_export(span, {"convergent.invocation.span_id": "a" * 16})
+    span.end()
+    assert isinstance(span._events, BoundedList)
+    assert isinstance(span._links, BoundedList)
+    assert _processors.trajectory_stamp(span) == {"convergent.invocation.span_id": "a" * 16}
+    provider.shutdown()
+
+
+@pytest.mark.usefixtures("pinned_sdk_version")
+def test_a_stamp_written_back_on_export_is_not_counted_dropped(
+    monkeypatch: pytest.MonkeyPatch, install: Callable[..., Installed]
+) -> None:
+    """Catches the export copy keeping the span's drop count after it writes the
+    evicted stamp keys back: those keys arrive, so only the others were lost."""
+    ours = InMemorySpanExporter()
+    _serve(monkeypatch, ours)
+    provider = install().provider
+    theirs = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(theirs))
+    tracer = provider.get_tracer("convergent.sdk")
+
+    with tracer.start_as_current_span(
+        "agent", attributes={"gen_ai.operation.name": "invoke_agent"}
+    ) as agent:
+        for index in range(200):
+            agent.set_attribute(f"llm.output_messages.{index}.content", "y")
+
+    (original,) = theirs.get_finished_spans()
+    (copy,) = ours.get_finished_spans()
+    stamp_keys = {
+        "convergent.invocation.span_id",
+        "convergent.invocation.start_time_unix_micros",
+        "convergent.root_invocation.span_id",
+        "convergent.root_invocation.start_time_unix_micros",
+    }
+    assert not stamp_keys & set(original.attributes or {}), "the stamp was evicted"
+    assert stamp_keys <= set(copy.attributes or {}), "and written back on the copy"
+    assert copy.dropped_attributes == original.dropped_attributes - len(stamp_keys)

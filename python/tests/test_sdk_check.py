@@ -21,6 +21,7 @@ import convergent
 from convergent import _core, _registry, _transport
 from convergent._check import Report
 from convergent._core import Status
+from convergent._user_agent import USER_AGENT
 
 _KEY = "k-check"  # pragma: allowlist secret
 _ENDPOINT = "https://dp.example.test"
@@ -69,7 +70,6 @@ def enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         _transport, "build_processor", lambda **_: SimpleSpanProcessor(InMemorySpanExporter())
     )
-    monkeypatch.setattr(_registry, "post_json", lambda *_, **__: {"deployment_id": "dep_abc"})
     convergent.init(api_key=_KEY, endpoint=_ENDPOINT, release=_RELEASE)
 
 
@@ -96,16 +96,19 @@ def test_check_reports_a_healthy_round_trip(monkeypatch: pytest.MonkeyPatch, ena
     report = convergent.check()
 
     assert calls[0]["url"] == f"{_ENDPOINT}/v1/check?release={_RELEASE}", (
-        "the server reports on the release init() registered, or on no deployment at all"
+        "the server reports on the release init() configured"
     )
-    assert calls[0]["headers"] == {"authorization": f"Bearer {_KEY}"}
+    assert calls[0]["headers"] == {
+        "authorization": f"Bearer {_KEY}",
+        "user-agent": USER_AGENT,
+    }
+    assert USER_AGENT.startswith("convergent-sdk-python/")
     assert report.round_trip == "ok"
     assert report.round_trip_ms is not None
     assert report.organization_id == "org_7c2b1a9e4d"
     assert report.agents == ["support-agent", "billing-agent"]
     assert report.agents_truncated is False
     assert report.notes == []
-    assert report.status.deployment == "dep_abc"
     assert report.status.release == _RELEASE
 
 
@@ -156,7 +159,6 @@ def test_check_still_asks_the_server_when_tracing_could_not_start(
     when the server's view is worth the most. The report must not say the key and
     endpoint are unset, and it must not skip the request."""
     monkeypatch.setattr(_transport, "build_processor", _refuse_to_start)
-    monkeypatch.setattr(_registry, "post_json", lambda *_, **__: {"deployment_id": "dep_abc"})
     calls = _record_gets(monkeypatch, _HEALTHY)
 
     status = convergent.init(api_key=_KEY, endpoint=_ENDPOINT, release=_RELEASE)
@@ -251,7 +253,6 @@ def test_a_report_with_an_enabled_but_unhealthy_sdk_shows_the_reason() -> None:
     report = Report(
         status=Status(
             enabled=True,
-            deployment="dep_abc",
             release=_RELEASE,
             destinations=["convergent"],
             reason="no_provider",
@@ -336,7 +337,6 @@ def test_the_printed_report_reads_like_the_readme() -> None:
     report = Report(
         status=Status(
             enabled=True,
-            deployment="dep_abc",
             release=_RELEASE,
             destinations=["convergent", "file:/data/spans.jsonl"],
             mode="attached",
@@ -448,7 +448,6 @@ def test_install_status_echoes_the_running_filters(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(
         _transport, "build_processor", lambda **_: SimpleSpanProcessor(InMemorySpanExporter())
     )
-    monkeypatch.setattr(_registry, "post_json", lambda *_, **__: {"deployment_id": "dep_abc"})
     convergent.otel.install(
         TracerProvider(),
         api_key=_KEY,

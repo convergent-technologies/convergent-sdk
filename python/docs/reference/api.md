@@ -36,7 +36,7 @@ The installed package's version string, `"0.0.0"` in a source checkout with no
 convergent.init(*, api_key=None, endpoint=None, release=None, agents=None,
                 require_span_attributes=None, reject_span_attributes=None,
                 destinations=(), tracer_provider=None,
-                debug=False, strict=False) -> Status
+                debug=False, strict=False, session_hosts=None) -> Status
 ```
 
 Configures tracing for the process. Call it once at startup.
@@ -79,6 +79,11 @@ Configures tracing for the process. Call it once at startup.
   `convergent.sdk` logger a level of its own.
 - **`strict`** (`bool`, optional; default: `False`): makes a configuration
   that cannot work raise at startup, instead of the default log-and-disable.
+- **`session_hosts`** (`list[str]`, optional; default: no hosts): the hosts
+  an outbound HTTP request may carry the [session](#session) ID to. Names
+  compare without case, and a port is never matched: list `jobs.example.com`,
+  since a `jobs.example.com:8443` entry matches no request. A single string raises
+  `TypeError`; an empty or non-string entry raises `ValueError`.
 
 If you set none of `agents`, `require_span_attributes`, and
 `reject_span_attributes`, every span the process records is sent.
@@ -92,14 +97,9 @@ returns a `Status` with `reason="already_configured"`.
 
 For `agents`, a value that is not a collection of names raises `TypeError`.
 An empty name, more than 256 names, or a name over 512 characters raises
-`ValueError`. These limits match what registration accepts.
+`ValueError`.
 [Strict startup](../configuration.md#strict-startup) lists every condition a
 configuration can be rejected on.
-
-Do not call `init()` in a request path. It blocks the calling thread while it
-registers the deployment, and registration retries for up to about five
-seconds. With a file as the only destination, it registers nothing and returns
-right away.
 
 #### Span filters
 
@@ -115,9 +115,8 @@ Returned by `init()`.
 | Field | Type | Allowed values | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | `bool` | `True`, `False` | tracing is on |
-| `deployment` | `str \| None` | — | the registered deployment id |
 | `release` | `str \| None` | — | the release this process reported |
-| `agents` | `list[str]` | — | the names `init()` declared, as the server echoed them back |
+| `agents` | `list[str]` | — | the names `init()` declared |
 | `destinations` | `list[str]` | — | e.g. `["convergent", "file:/data/traces/spans.jsonl"]` |
 | `mode` | `str` | `"owned"`, `"attached"` | whether `init()` created the tracer provider or attached to yours |
 | `app_url` | `str \| None` | — | reserved; always `None` |
@@ -213,8 +212,10 @@ session stays active.
 Await async work before leaving the block, or open a session inside the
 task.
 A raw thread needs a context copy or its own session block. The ID does not
-enter OpenTelemetry baggage or outbound requests, so open a session in each
-service.
+enter OpenTelemetry baggage. It enters an outbound request only to a host
+listed in [`init(session_hosts=...)`](#init), or a carrier filled with
+[`carrier.inject(..., session=True)`](#carrierinject). Otherwise, open a
+session in each service.
 
 `attributes=` and `set_attribute()` keep the direct keys
 `gen_ai.conversation.id` and `session.id`. `session()` adds its own key,
@@ -272,6 +273,7 @@ input and output inside the decorated function, use
 - **`model`** (`str`, optional): the model the span asks for. It lands as
   `gen_ai.request.model` on any operation. On an agent run it is the model the
   agent calls. It only records the name and does not configure a model client.
+  An empty or blank `model` is not recorded, and the first one logs a warning.
 - **`system_instructions`** (`str`, optional) and **`tools`**
   (`Sequence[Mapping[str, Any]]`, optional): how the agent is configured.
   `system_instructions` is the prompt it runs with, and `tools` is the tool
@@ -470,7 +472,7 @@ the other two, pass your own value in `attributes`.
 | Member | What it does |
 | --- | --- |
 | `set_input(value)` | writes `gen_ai.input.messages`, or `gen_ai.tool.call.arguments` on a tool call |
-| `set_output(value)` | writes `gen_ai.output.messages`, or `gen_ai.tool.call.result` on a tool call |
+| `set_output(value)` | writes `gen_ai.output.messages`, or `gen_ai.tool.call.result` on a tool call, when the span ends without an error |
 | `set_attribute(key, value)` | writes one attribute of your own |
 | `set_context_attributes(pairs)` | marks this span and every span started after the call inside it, for the [span filters](#span-filters) |
 | `set_tool_call_id(call_id)` | writes `gen_ai.tool.call.id`, which pairs the model's request for a call with the call itself |
@@ -487,6 +489,46 @@ values become the text of one message, with role `user` for input and
 `assistant` for output. For example, `set_input([])` records one user message
 whose text is `[]`. These methods do not read function arguments or return
 values automatically.
+
+**What content the SDK keeps.** These rules apply to `set_input()`,
+`set_output()`, and `tools`:
+
+- A value must be portable JSON: `None`, a bool, an int, a finite float, a
+  string, or lists, tuples, and dicts of these.
+- A dict key that is an int, float, bool, or `None` is written as a string, as
+  `json.dumps` writes it.
+- A pydantic model, such as a response from the OpenAI, Anthropic, or LiteLLM
+  client, is recorded as `model.model_dump(mode="json")` gives it, at any depth.
+  A list of models that each have a `role` passes through as a message list.
+- Any other value is dropped whole, and the first one logs a warning. That
+  includes a `datetime`, a `set`, `bytes`, a dataclass, `float("nan")` or
+  `float("inf")`, and a dict that contains itself.
+- To keep such a value, convert it first, such as `when.isoformat()`.
+- A dropped input leaves the span as it was. If an earlier `set_input()` call
+  on the same span recorded a value, that value stays, along with
+  `convergent.content.source`.
+- A dropped output also clears an output an earlier `set_output()` call
+  recorded, so the span ends with no output. On a span another library opened,
+  an earlier output was already written, so it stays.
+
+`set_output()` holds the output until the span ends:
+
+- When the span ends normally, the output is written.
+- When the span ends with an exception or a cancellation, the output is
+  dropped. An exception still marks the span's status as an error, and a
+  cancellation still leaves it unset.
+- A decorated generator that its reader stops after a chunk ends normally, so
+  the output is written. That covers `break`, `next()`, `islice()`, `zip()`,
+  `close()` and `aclose()`, whether the reader stopped at the last chunk or
+  before it, including when your own loop raises or is cancelled: the
+  exception rule above covers only the generator itself. Code after the
+  `yield` the reader stopped at never runs, so call `set_output()` before
+  yielding the last chunk, or in a `finally`.
+- If the generator's own `finally` raises when the reader stops it, the span
+  ends with that exception: the output is dropped, the span's status is an
+  error, and the reader's `close()` or `aclose()` raises it.
+- On a span another library opened, the SDK does not see the span end, so the
+  output is written at once.
 
 `set_attribute()` drops keys starting with `convergent.` and the eight keys
 listed below. It logs the rejected key.
@@ -734,9 +776,8 @@ Two `File` values naming the same file collapse into one destination. Two
 different files do not, and the SDK logs one warning that every span is being
 written twice.
 
-This route registers no deployment, so the release on each span is the file's
-only version evidence. Pass `release`, and Convergent links those traces to it
-when the file is ingested.
+Pass `release`, and Convergent links those traces to it when the file is
+ingested.
 
 Keep the directory on a local disk you control. Several writers rely on append
 behavior to keep lines intact, and a network filesystem does not guarantee it.
@@ -836,9 +877,77 @@ every one keyword-only, plus:
 - **`tracer_provider`** (`TracerProvider`, optional; default: the global
   provider): the provider `span()` and `observe()` then record through.
 
-Construction makes no network call, and no span waits for one. The first span
-starts deployment registration on its own thread. Every span carries your
-release, whether or not registration has finished.
+Construction starts one background request for the workspace tag
+(`GET /v1/check`), and no span waits for it.
+
+### propagator()
+
+```python
+convergent.propagator() -> TextMapPropagator
+```
+
+**Returns:** the global propagator with the Convergent `tracestate` member
+added, or the global propagator itself when `init()` already wrapped it.
+Calling it never changes the global propagator. The member needs the workspace
+tag that `init()` or `otel.install()` fetches, and a propagator from this call
+without `init()` sends the session ID to no host.
+[Traces that cross processes](../opentelemetry.md#traces-that-cross-processes)
+says what the member holds and who gets it.
+
+### carrier.inject()
+
+```python
+convergent.carrier.inject(carrier, context=None, setter=default_setter, *,
+                          session=False) -> None
+```
+
+Writes the active span's `traceparent`, `tracestate`, and Convergent member
+into `carrier`, such as a queue message's attributes or a job row, through the
+global propagator wrapped by [propagator()](#propagator). It never raises from
+the Convergent member. `session=True` also sends the session ID; use it only
+for a carrier that stays inside your own services. `setter` writes one header.
+
+For HTTP headers you pass to a library, follow the example in
+[Traces that cross processes](../opentelemetry.md#traces-that-cross-processes).
+
+### carrier.extract()
+
+```python
+convergent.carrier.extract(carrier, context=None, getter=default_getter) -> Context
+```
+
+**Returns:** a `Context` with the remote span as parent. When the carrier holds
+a Convergent member from your workspace that names that parent span, an agent
+started in the context is filed under the sender's agent and takes the session
+ID the member carries. `getter` reads one header.
+
+Before extracting context from an untrusted caller, follow
+[Requests from callers you do not trust](../opentelemetry.md#requests-from-callers-you-do-not-trust).
+
+## Temporal
+
+### temporal.TracingInterceptor
+
+```python
+import convergent.temporal
+
+convergent.temporal.TracingInterceptor(*args, send_session=False, **kwargs)
+```
+
+Needs `pip install "convergent-sdk[temporal]"`. Pass it to the Temporal
+`Client` instead of temporalio's or Logfire's `TracingInterceptor`, not
+alongside them. An agent inside a workflow run starts its own trajectory. See
+[Temporal](../integrations/index.md#temporal).
+
+**Returns:** a subclass of temporalio's `TracingInterceptor`, used wherever that one is.
+
+**Arguments:**
+
+- **`send_session`** (`bool`, optional; default: `False`): also send the
+  session ID, which Temporal stores in the workflow's history. Use it only when
+  your Temporal cluster stays inside your own services.
+- Every other argument, such as `tracer=`, passes through to temporalio's
+  `TracingInterceptor`.
 
 ## Environment variables
 

@@ -5,10 +5,8 @@ import logging
 import os
 import threading
 import time
-import urllib.parse
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -16,7 +14,15 @@ from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, SpanProcessor, TracerProvider
 
-from . import _artifacts, _policy, _processors, _registry, _semantic, _transport
+from . import (
+    _artifacts,
+    _policy,
+    _processors,
+    _propagation,
+    _semantic,
+    _tag_fetch,
+    _transport,
+)
 from ._config import (
     _FLAG_ON,
     _clean,
@@ -39,12 +45,9 @@ logger = logging.getLogger("convergent.sdk")
 class Snapshot:
     provider: TracerProvider | None = None
     release: str | None = None
-    # Resource attributes carrying the deployment identity init() registered.
-    deployment: Mapping[str, str] = field(default_factory=dict)
     # False when we attached to a provider the caller already set, which means
     # its Resource is theirs and frozen, and its processors are theirs too.
     owns_provider: bool = False
-    agents: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -52,12 +55,8 @@ class Status:
     """What ``init()`` configured."""
 
     enabled: bool
-    deployment: str | None = None
     release: str | None = None
-    #: The declared names the server confirmed it linked, falling back to what was
-    #: declared when it did not say. This reports registration, not filtering. The
-    #: filter always enforces the names this process declared, so a name the server
-    #: dropped is still a name whose spans are sent.
+    #: The agent names this process declared, which are the names the filter sends.
     agents: list[str] = field(default_factory=list)
     destinations: list[str] = field(default_factory=list)
     mode: Literal["owned", "attached"] = "owned"
@@ -118,6 +117,10 @@ class FlushResult:
 
 _DRAIN_BUDGET_S = 5.0
 
+#: The whole exit drain, held spans and exporters together, ends within this
+#: (Theo, D-110 A, 2026-11-03).
+_EXIT_BUDGET_S = 10.0
+
 
 #: Why startup last failed, and the configuration it was trying to run. A
 #: rejected configuration never got far enough to have one. One variable rather
@@ -135,10 +138,6 @@ _drain: list[SpanProcessor] = []
 #: Asked which provider carries the span processor a caller added themselves. Set
 #: by :func:`_adopt`, and ``None`` for every other way of configuring tracing.
 _provider_source: Callable[[], TracerProvider | None] | None = None
-#: A start-registration callable for each configuration that was adopted through
-#: a ConvergentSpanProcessor. ``flush()`` calls these before draining, so the
-#: first flush also starts deployment registration.
-_registration_triggers: dict[_Config, Callable[[], None]] = {}
 _warned: set[str] = set()
 #: The clock :func:`flush` measures its budget against, named so a test can hold
 #: it still and drive the budget by hand instead of racing a loaded machine.
@@ -167,6 +166,7 @@ def init(
     tracer_provider: TracerProvider | None = None,
     debug: bool = False,
     strict: bool = False,
+    session_hosts: Sequence[str] | None = None,
 ) -> Status:
     """Configure tracing for this process and describe what was configured.
 
@@ -211,9 +211,8 @@ def init(
     services.
 
     ``api_key`` implies the Convergent destination. ``endpoint`` overrides the
-    managed ingest endpoint for local or private receivers. The same address
-    registers the deployment and receives spans. ``destinations`` adds places on
-    top of that, and every span the filters keep goes to all of them:
+    managed ingest endpoint for local or private receivers. ``destinations`` adds
+    places on top of that, and every span the filters keep goes to all of them:
 
         init(destinations=[convergent.File("/data/traces"), convergent.Console()])
 
@@ -226,6 +225,21 @@ def init(
     processors are added to it, its Resource is left alone, and the global provider
     is not set. Leave it out and ``init()`` uses the global provider when one exists
     and creates one when it does not.
+
+    ``session_hosts`` names the hosts an outbound request may carry the
+    session id to, e.g. ``session_hosts=["jobs.example.com"]``. ``init()``
+    installs a propagator that adds the trajectory stamp (span ids and start
+    times) to every outbound ``tracestate``, whatever the host, model providers
+    included. None is sent when the process has no workspace tag, when the
+    SDK did not stamp the agent running (one under a remote parent with no
+    accepted entry, a failed stamp, or a span that started before the SDK
+    attached), when no W3C traceparent goes out, when the entry does not fit
+    the W3C limits, or when the request already holds a tracestate header the
+    SDK cannot parse, from which it removes only a ``convergent=`` member. The
+    session id, which may name a person, rides along only
+    when the instrumented request's host is listed.
+    None are listed by default, so the session id goes only into a carrier
+    filled with ``convergent.carrier.inject(..., session=True)``.
 
     ``debug`` raises this SDK's own logger to DEBUG.
 
@@ -242,15 +256,15 @@ def init(
 
     Strict startup is the one place this SDK raises, and only for a problem that
     is local and deterministic: the same call fails the same way on every
-    machine. Every check runs before the lock, the registration call, the
-    processors, and any global, so a raise leaves the process as it was and a
-    corrected call afterwards works. The one mark a raise can leave is the spans
-    file itself, because proving a ``File`` destination can be opened creates it
-    and any missing parent directories. Nothing after this returns raises, and
-    neither does a repeat call: any library in the process may call ``init()`` at
-    any time, so a second call keeps the first configuration even when its own
-    arguments are bad. Two threads racing their first calls are both claiming
-    calls, and the loser can raise.
+    machine. Every check runs before the lock, the processors, and any global, so
+    a raise leaves the process as it was and a corrected call afterwards works.
+    The one mark a raise can leave is the spans file itself, because proving a
+    ``File`` destination can be opened creates it and any missing parent
+    directories. Nothing after this returns raises, and neither does a repeat
+    call: any library in the process may call ``init()`` at any time, so a second
+    call keeps the first configuration even when its own arguments are bad. Two
+    threads racing their first calls are both claiming calls, and the loser can
+    raise.
 
     Raises:
         Only when ``strict`` is on, from the argument or ``CONVERGENT_STRICT``.
@@ -260,13 +274,16 @@ def init(
             ``opentelemetry.sdk.trace`` provider, ``agents`` that is not a list
             of names, ``require_span_attributes`` or ``reject_span_attributes``
             that is not a mapping of attribute names to values, or a
-            ``destinations`` entry that is not a ``File`` or a ``Console``.
+            ``destinations`` entry that is not a ``File`` or a ``Console``, or
+            ``session_hosts`` that is not a list.
         ValueError: an argument or ``CONVERGENT_*`` variable has a value that
             cannot work -- nothing configured at all, no release, an endpoint
             that is not an http or https URL, an empty or oversized agent name,
-            more names than registration accepts, an empty
+            more names than the SDK accepts, an empty
             ``require_span_attributes`` or ``reject_span_attributes`` mapping
-            or attribute name, a ``require_span_attributes`` or
+            or attribute name, a ``session_hosts`` entry that is not a
+            string or is empty, a
+            ``require_span_attributes`` or
             ``reject_span_attributes`` value of ``None`` -- pass an empty list
             to match nothing -- a ``CONVERGENT_REQUIRE_SPAN_ATTRIBUTES`` or
             ``CONVERGENT_REJECT_SPAN_ATTRIBUTES`` that is not JSON, or an
@@ -289,6 +306,7 @@ def init(
             tracer_provider=tracer_provider,
             debug=debug,
             strict=strict,
+            session_hosts=session_hosts,
         )
 
     strict_on = _strict_enabled(strict)
@@ -304,6 +322,7 @@ def init(
             tracer_provider=tracer_provider,
             debug=debug,
             strict=strict,
+            session_hosts=session_hosts,
         )
         config = _probed_config(config, strict_on)
     except Exception as error:
@@ -319,12 +338,12 @@ def init(
 
 
 def _commit_config(config: _Config) -> Status:
-    """Build ``config``'s destinations, register the deployment, and claim the process.
+    """Build ``config``'s destinations and claim the process.
 
     Everything with a side effect, after validation has proved the configuration
     can work. A failure anywhere in here is ``setup_failed`` rather than a raise:
     the deterministic problems are already behind us, so what is left is the
-    machine and the network.
+    machine.
     """
     started = False
     destination_processors: list[SpanProcessor] = []
@@ -333,18 +352,6 @@ def _commit_config(config: _Config) -> Status:
             destination_processors = _build_destinations(config.destinations)
         except Exception:
             return _fail_setup(config)
-
-        # Registration runs with no lock held. It is a blocking network call, so
-        # holding _lock across it would stall every other SDK caller, and a fork
-        # inside that window would leave the child holding a lock nobody releases.
-        # With no credentials it makes no call at all -- see _register_deployment.
-        deployment, confirmed = _register_deployment(
-            api_key=config.api_key,
-            endpoint=config.endpoint,
-            release=config.release,
-            agents=config.agents,
-        )
-        linked = tuple(confirmed) if confirmed is not None else (config.agents or ())
 
         with _lock:
             global _config, _startup_failure, _state
@@ -355,22 +362,27 @@ def _commit_config(config: _Config) -> Status:
                 return live_status()
 
             try:
-                provider, owns_provider = _provider_for(config, deployment)
-                processors = _attach_processors(
-                    provider, config, deployment, destination_processors
-                )
+                provider, owns_provider = _provider_for(config)
+                processors = _attach_processors(provider, config, destination_processors)
                 if not processors:
                     return _fail_setup(config)
                 if owns_provider:
                     trace.set_tracer_provider(provider)
+                _propagation.install_global(config.session_hosts)
             except Exception:
                 return _fail_setup(config)
             _drain.extend(processors)
             _config = config
             _startup_failure = None
-            _state = Snapshot(provider, config.release, deployment, owns_provider, linked)
+            _state = Snapshot(
+                provider=provider,
+                release=config.release,
+                owns_provider=owns_provider,
+            )
             _ensure_process_drains()
             started = True
+        if config.api_key and config.endpoint:
+            _tag_fetch.fetch_workspace_tag(config.endpoint, config.api_key)
         return live_status()
     finally:
         # An uncommitted processor holds a descriptor and an export thread.
@@ -378,20 +390,18 @@ def _commit_config(config: _Config) -> Status:
             _shut_down(destination_processors)
 
 
-def _provider_for(config: _Config, deployment: Mapping[str, str]) -> tuple[TracerProvider, bool]:
+def _provider_for(config: _Config) -> tuple[TracerProvider, bool]:
     """The provider to attach to, and whether this process built it.
 
     A provider the caller handed over or already installed is theirs, so its
-    Resource is left alone and the deployment identity rides the semantic
-    processor instead.
+    Resource is left alone.
     """
     given = config.tracer_provider
     current = trace.get_tracer_provider() if given is None else given
     if isinstance(current, TracerProvider):
         return current, False
-    attributes: dict[str, str] = dict(deployment)
-    attributes["service.version"] = config.release
-    return TracerProvider(resource=Resource.create(attributes), span_limits=_span_limits()), True
+    resource = Resource.create({"service.version": config.release})
+    return TracerProvider(resource=resource, span_limits=_span_limits()), True
 
 
 def _probed_config(config: _Config, strict: bool) -> _Config:
@@ -461,6 +471,7 @@ def _repeat_init(
     tracer_provider: object,
     debug: object,
     strict: object,
+    session_hosts: object,
 ) -> Status:
     """The status an ``init()`` call gets once another configuration owns the process.
 
@@ -482,6 +493,7 @@ def _repeat_init(
             tracer_provider=tracer_provider,
             debug=debug,
             strict=strict,
+            session_hosts=session_hosts,
         )
     except Exception:
         config = None
@@ -503,17 +515,16 @@ def live_status() -> Status:
         if failure is None:
             return Status(enabled=False, reason="missing_config")
         reason, failed = failure
-        # check() sends this release, so the server reports on the deployment
-        # this process meant to reach.
+        # check() sends this release, so the server reports on the release this
+        # process meant to run.
         return Status(
             enabled=False, reason=reason, release=failed.release if failed is not None else None
         )
     policy = config.policy
     return Status(
         enabled=True,
-        deployment=state.deployment.get("convergent.deployment.id"),
         release=state.release,
-        agents=list(state.agents),
+        agents=list(config.agents or ()),
         destinations=_destinations(config),
         mode="owned" if state.owns_provider else "attached",
         # Spans the caller's own tracers record still reach us through their
@@ -677,14 +688,12 @@ def _build_destination(destination: Destination) -> SpanProcessor | None:
 def _attach_processors(
     provider: TracerProvider,
     config: _Config,
-    deployment: Mapping[str, str],
     built: Sequence[SpanProcessor],
 ) -> list[SpanProcessor]:
     """Give ``provider`` the semantic processor, the context stamper, and the filtered destinations.
 
     Semantic first, exporters second, so a span carries its identity before
-    anything ships it. ``deployment`` goes to the semantic processor because an
-    attached provider's Resource is the caller's and cannot carry it.
+    anything ships it.
 
     ``built`` holds the destination processors :func:`_build_destinations` already
     made, because a destination that will not start settles the configuration and
@@ -713,7 +722,7 @@ def _attach_processors(
     if not exporters:
         return []
 
-    semantic = SemanticSpanProcessor(config.release, deployment)
+    semantic = SemanticSpanProcessor(config.release)
     wrapped = _processors.wrap(config.policy, config.agents, [*exporters, *uploads])
     for processor in [semantic, _processors._STAMPER, *wrapped]:
         provider.add_span_processor(processor)
@@ -759,14 +768,13 @@ def flush(
     started = _monotonic()
     with _lock:
         processors = tuple(_drain)
-        triggers = tuple(_registration_triggers.values())
-    for trigger in triggers:
-        trigger()
     if not processors:
         return FlushResult(ok=True, pending=0, dropped=0, elapsed_ms=0)
 
     _warn_flush_inside_span()
     deadline = started + max(timeout_ms, 0) / 1_000
+    # Spans waiting for the workspace tag go to the exporters first.
+    _processors.release_held(deadline - _monotonic())
     ok = True
     for processor in processors:
         remaining_ms = max(0, int((deadline - _monotonic()) * 1_000))
@@ -778,7 +786,9 @@ def flush(
             logger.warning("Convergent could not flush all pending traces")
             ok = False
 
-    pending = sum(_transport.pending_spans(processor) for processor in processors)
+    pending = _processors.held_spans() + sum(
+        _transport.pending_spans(processor) for processor in processors
+    )
     lost = _transport.lost_spans()
     ok = ok and lost == 0
     dropped = _transport.dropped_spans() + lost
@@ -880,10 +890,8 @@ def _running_config() -> _Config | None:
 
 def _adopt(
     config: _Config,
-    deployment: Mapping[str, str],
     exporters: Sequence[SpanProcessor],
     provider_source: Callable[[], TracerProvider | None],
-    start_registration: Callable[[], None] | None = None,
 ) -> _Config | None:
     """Claim this process for a processor the caller added to their own provider.
 
@@ -908,13 +916,9 @@ def _adopt(
         _config = config
         _startup_failure = None
         _provider_source = provider_source
-        if start_registration is not None:
-            _registration_triggers[config] = start_registration
         _state = Snapshot(
             provider=config.tracer_provider,
             release=config.release,
-            deployment=dict(deployment),
-            agents=config.agents or (),
         )
         _ensure_process_drains()
     return None
@@ -925,121 +929,21 @@ def _abandon(config: _Config, exporters: Sequence[SpanProcessor]) -> None:
 
     ``install()`` claims the process and then asks the provider to carry the
     processor. If that call raises, the provider never carried it, so the claim
-    is rolled back and the exporter is removed from the drain list.
+    is rolled back, the exporter is removed from the drain list, and the workspace
+    tag request is forgotten so the next setup asks with its own key.
     """
-    global _config, _provider_source, _state, _drain, _registration_triggers
+    global _config, _provider_source, _state, _drain
     with _lock:
         if _config == config:
             _config = None
             _provider_source = None
-            _registration_triggers.pop(config, None)
             _state = Snapshot()
+            _tag_fetch._forget()
         for processor in exporters:
             try:
                 _drain.remove(processor)
             except ValueError:
                 pass
-
-
-def _link_deployment(deployment: Mapping[str, str], linked: Sequence[str] | None) -> None:
-    """Record what registration answered, so ``check()`` names the deployment."""
-    global _state
-    with _lock:
-        _state = replace(
-            _state,
-            deployment=dict(deployment),
-            agents=tuple(linked) if linked is not None else _state.agents,
-        )
-
-
-def _register_deployment(
-    *,
-    api_key: str | None,
-    endpoint: str | None,
-    release: str,
-    agents: tuple[str, ...] | None,
-) -> tuple[dict[str, str], list[str] | None]:
-    """Register the deployment and return its identity and its linked agents.
-
-    The first half is the Resource attributes that carry the deployment's
-    identity. The second is the agent names the server says it linked, or ``None``
-    when it did not answer that question. That is different from answering that it
-    linked none.
-
-    Never raises. On any failure the release still rides every trace as
-    ``convergent.deployment.fingerprint``, which the server resolves against the
-    same ``(organization_id, fingerprint)`` key registration upserts on. A
-    file-only process takes that same fallback without making a request: there
-    is no endpoint to reach, and whoever ingests the file resolves the
-    fingerprint the same way a live receiver would.
-    """
-    if not api_key or not endpoint:
-        return {"convergent.deployment.fingerprint": release}, None
-
-    body: dict[str, object] = {
-        "fingerprint": release,
-        "fingerprint_kind": "provided",
-        "sdk_version": _sdk_version(),
-    }
-    if agents is not None:
-        body["agents"] = list(agents)
-    # Display metadata only, and only when the caller set the standard OTel var --
-    # never OTel's "unknown_service" placeholder.
-    service_name = _clean(os.environ.get("OTEL_SERVICE_NAME"))
-    if service_name:
-        body["service_name"] = service_name
-
-    try:
-        result = _registry.post_json(
-            f"{endpoint.rstrip('/')}/v1/deployments",
-            body,
-            headers={"Authorization": f"Bearer {api_key}"},
-        )
-        deployment_id = result.get("deployment_id")
-        if isinstance(deployment_id, str) and deployment_id:
-            return {"convergent.deployment.id": deployment_id}, _linked_agents(result)
-        reason = "no_deployment_id"
-        unexpected = False
-    except _registry.RegistrationError as exc:
-        reason = exc.reason
-        unexpected = False
-    except Exception:
-        # post_json promises to raise only RegistrationError, so anything here is
-        # a bug in it -- keep the traceback rather than flattening it to a label.
-        reason = "unexpected"
-        unexpected = True
-
-    # Scheme and host are in the message because an environment override -- a
-    # .env file a library import loaded, say -- is otherwise invisible here.
-    # Never the full URL: one that passes validation can still carry userinfo
-    # or a query-string token, and _config's convention is never to echo it.
-    parsed = urllib.parse.urlsplit(endpoint)
-    logger.warning(
-        "Convergent deployment registration failed at %s://%s (%s); traces will "
-        "carry the release fingerprint for the server to resolve",
-        parsed.scheme,
-        parsed.hostname or "",
-        reason,
-        exc_info=unexpected,
-    )
-    return {"convergent.deployment.fingerprint": release}, None
-
-
-def _linked_agents(result: Mapping[str, object]) -> list[str] | None:
-    names = result.get("agents")
-    if isinstance(names, list) and all(isinstance(name, str) for name in names):
-        return list(names)
-    return None
-
-
-def _sdk_version() -> str:
-    # Two names because this module can ship under either distribution name.
-    for distribution in ("convergent-sdk", "convergent"):
-        try:
-            return version(distribution)
-        except PackageNotFoundError:
-            continue
-    return "0.0.0"
 
 
 def _warn_once(key: str, message: str, *, level: int = logging.WARNING) -> None:
@@ -1160,8 +1064,8 @@ def _reset_lock_after_fork() -> None:
     fork() copies memory but only the calling thread, so a lock another thread
     held at fork time arrives locked in the child with nobody left to release it
     -- the next snapshot() or flush() would block forever. Registered
-    unconditionally at import: init()'s registration POST is the widest window,
-    but any lock holder at the wrong moment is enough.
+    unconditionally at import, because any lock holder at the wrong moment is
+    enough.
     """
     global _lock
     _lock = threading.RLock()
@@ -1174,10 +1078,15 @@ if hasattr(os, "register_at_fork"):
 def _drain_all_processors() -> None:
     # One budget for the whole drain, not 5s each: this runs at interpreter exit,
     # and a per-processor timeout would let a hung receiver hold exit for 5s per
-    # destination.
-    deadline = time.monotonic() + _DRAIN_BUDGET_S
+    # destination. Spans waiting for the workspace tag go first, since the
+    # exporters below are shut down before the provider's own exit hook would
+    # hand them over. Both share one exit deadline (D-110 A): the exporters get
+    # their budget, cut to what the held spans left of it.
+    exit_deadline = _monotonic() + _EXIT_BUDGET_S
+    _processors.release_held(_processors.HELD_RELEASE_BUDGET_S)
+    deadline = min(_monotonic() + _DRAIN_BUDGET_S, exit_deadline)
     for processor in list(_drain):
-        remaining_ms = max(0, int((deadline - time.monotonic()) * 1_000))
+        remaining_ms = max(0, int((deadline - _monotonic()) * 1_000))
         try:
             processor.force_flush(remaining_ms)
             processor.shutdown()
@@ -1207,10 +1116,11 @@ def _span_limits() -> SpanLimits:
 
 
 def _reset_for_tests() -> None:
-    global _config, _dropped, _provider_source, _startup_failure, _state, _registration_triggers
+    global _config, _dropped, _provider_source, _startup_failure, _state
     with _lock:
         _shut_down(_drain)
         _artifacts._reset_for_tests()
+        _propagation._reset_for_tests()
         _transport.dropped_spans()
         _transport.lost_spans()
         _state = Snapshot()
@@ -1219,7 +1129,6 @@ def _reset_for_tests() -> None:
         _dropped = None
         _provider_source = None
         _drain.clear()
-        _registration_triggers.clear()
         _warned.clear()
         _semantic._reported.clear()
         _semantic.forget_open_spans()

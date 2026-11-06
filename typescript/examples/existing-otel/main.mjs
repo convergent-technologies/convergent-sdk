@@ -49,8 +49,6 @@ try {
   assert.ok(root.attributes["gen_ai.input.messages"]);
   assert.ok(root.attributes["gen_ai.output.messages"]);
   for (const span of spans) {
-    assert.equal(span.attributes["convergent.semantic.version"], undefined);
-    assert.equal(span.attributes["convergent.execution.id"], undefined);
     assert.equal(span.attributes["convergent.session.id"], undefined);
   }
   console.log(JSON.stringify({ ...result, existingExporterSpans: spans.length }, null, 2));

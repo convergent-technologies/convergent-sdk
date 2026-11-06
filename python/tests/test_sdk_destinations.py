@@ -17,13 +17,14 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import requests
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import convergent
-from convergent import _console_export, _core, _registry, _transport
+from convergent import _console_export, _core, _transport
 from convergent._console_export import ConsoleSpanExporter
 from convergent._file_export import SPANS_FILENAME
 
@@ -37,11 +38,10 @@ def reset_sdk(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "CONVERGENT_TRACES_EXPORTER",
         "CONVERGENT_STRICT",
         "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_TIMEOUT",
+        "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
     ):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(
-        _registry, "post_json", lambda *a, **k: {"deployment_id": "dep_test", "is_new": True}
-    )
     _reset_otel()
     _core._reset_for_tests()
     yield
@@ -741,6 +741,72 @@ def test_flush_reports_the_spans_a_full_queue_threw_away(
 
     assert convergent.flush(timeout_ms=5_000).dropped > 0
     assert convergent.flush().dropped == 0, "dropped counts since the last flush"
+
+
+def test_network_destination_refreshes_idle_connections_and_retries_one_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 0.0
+    attempts = 0
+    pool_resets = 0
+    timeouts: list[float] = []
+
+    def monotonic() -> float:
+        return now
+
+    def send(_request: Any, **kwargs: Any) -> requests.Response:
+        nonlocal attempts, now
+        attempts += 1
+        timeout = float(kwargs["timeout"])
+        timeouts.append(timeout)
+        if attempts == 4:
+            now += timeout
+            raise requests.exceptions.ReadTimeout()
+        response = requests.Response()
+        response.status_code = 200
+        response.reason = "OK"
+        return response
+
+    def close() -> None:
+        nonlocal pool_resets
+        pool_resets += 1
+
+    session = requests.Session()
+    monkeypatch.setattr(session, "send", send)
+    monkeypatch.setattr(session, "close", close)
+    monkeypatch.setattr(requests, "Session", lambda: session)
+    monkeypatch.setattr(_transport.time, "monotonic", monotonic)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1")
+    convergent.init(
+        api_key="key",  # pragma: allowlist secret
+        endpoint="http://127.0.0.1:4318",
+        release="r1",
+    )
+
+    @convergent.observe(name="connection-policy", operation="agent_run")
+    def work() -> None: ...
+
+    work()
+    assert convergent.flush(timeout_ms=2_000).ok is True
+    now += 1
+    work()
+    assert convergent.flush(timeout_ms=2_000).ok is True
+    assert pool_resets == 0
+
+    now += 60
+    work()
+    assert convergent.flush(timeout_ms=2_000).ok is True
+    assert pool_resets == 1
+
+    work()
+    result = convergent.flush(timeout_ms=2_000)
+
+    assert result.ok is True
+    assert result.dropped == 0
+    assert attempts == 5
+    assert pool_resets == 2
+    assert timeouts == pytest.approx([1.0, 1.0, 1.0, 1.0, 0.5], abs=0.001)
+    assert sum(timeouts[-2:]) <= 1.5
 
 
 # --------------------------------------------------------------------------

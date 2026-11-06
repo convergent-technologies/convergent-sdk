@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
+import itertools
 import json
 import logging
 import re
 import threading
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Generator, Iterator
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
+import pydantic
 import pytest
 from opentelemetry import baggage, trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -22,7 +27,8 @@ from opentelemetry.trace import (
 )
 
 import convergent
-from convergent import _core, _registry, _semantic, _transport
+from convergent import _core, _semantic, _transport
+from convergent._file_export import SPANS_FILENAME
 
 
 @pytest.fixture
@@ -36,11 +42,6 @@ def start_sdk(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., InMemor
         _reset_otel()
         _core._reset_for_tests()
         exporter = InMemorySpanExporter()
-        monkeypatch.setattr(
-            _registry,
-            "post_json",
-            lambda *a, **k: {"deployment_id": "dep_test", "is_new": True},
-        )
         monkeypatch.setattr(
             _transport,
             "build_processor",
@@ -143,45 +144,224 @@ def test_observe_keeps_sync_and_async_generators_open_during_iteration(
     assert [span.name for span in spans] == ["stream", "async-stream"]
 
 
-def test_generator_closed_early_does_not_mark_span_as_error(
-    start_sdk: Callable[..., InMemorySpanExporter],
+#: The output every stream below records before its last chunk goes out.
+_STREAM_OUTPUT = [{"role": "assistant", "parts": [{"type": "text", "content": "Hello"}]}]
+
+
+@pytest.fixture
+def file_spans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Callable[[], dict[str, dict[str, Any]]]]:
+    """Start the SDK with only a File destination; the callable flushes and
+    returns each span in the spans file by name."""
+    for name in ("CONVERGENT_API_KEY", "CONVERGENT_ENDPOINT", "CONVERGENT_SPANS_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    _reset_otel()
+    _core._reset_for_tests()
+    convergent.init(release="r1", destinations=[convergent.File(tmp_path)])
+
+    def read() -> dict[str, dict[str, Any]]:
+        convergent.flush()
+        found: dict[str, dict[str, Any]] = {}
+        for line in (tmp_path / SPANS_FILENAME).read_text().splitlines():
+            for resource_spans in json.loads(line)["resourceSpans"]:
+                for scope_spans in resource_spans["scopeSpans"]:
+                    for exported in scope_spans["spans"]:
+                        found[exported["name"]] = exported
+        return found
+
+    yield read
+    provider = _core.active_provider()
+    if provider is not None:
+        provider.shutdown()
+    _core._reset_for_tests()
+    _reset_otel()
+
+
+def _string_attributes(exported: dict[str, Any]) -> dict[str, str]:
+    return {
+        item["key"]: item["value"]["stringValue"]
+        for item in exported.get("attributes", [])
+        if "stringValue" in item["value"]
+    }
+
+
+def _read_and_break_on_last(stream: Iterator[str]) -> list[str]:
+    chunks = []
+    for chunk in stream:
+        chunks.append(chunk)
+        if chunk == "lo":  # the reader's own finish signal
+            break
+    return chunks
+
+
+def _read_with_next(stream: Iterator[str]) -> list[str]:
+    return [next(stream), next(stream)]
+
+
+def _read_and_close_after_first(stream: Generator[str, None, None]) -> list[str]:
+    chunks = [next(stream)]
+    stream.close()
+    return chunks
+
+
+@pytest.mark.parametrize(
+    "read_stream",
+    [
+        pytest.param(_read_and_break_on_last, id="break-on-last-chunk"),
+        pytest.param(_read_with_next, id="next"),
+        pytest.param(lambda stream: list(itertools.islice(stream, 2)), id="islice"),
+        # zip pulls from range first, so the stream is never asked past "lo".
+        pytest.param(
+            lambda stream: [chunk for _, chunk in zip(range(2), stream, strict=False)], id="zip"
+        ),
+        pytest.param(_read_and_close_after_first, id="close-after-first-chunk"),
+        pytest.param(list, id="read-to-end"),
+    ],
+)
+def test_generator_its_reader_stops_keeps_its_output(
+    file_spans: Callable[[], dict[str, dict[str, Any]]],
+    read_stream: Callable[[Generator[str, None, None]], list[str]],
 ) -> None:
-    exporter = start_sdk()
+    """A reader that stops a stream after a chunk keeps the output, as 0.0.11
+    did, and the status stays unset."""
 
     @convergent.observe(name="stream", operation="model_call")
-    def stream() -> Generator[int, None, None]:
-        yield 1
-        yield 2
+    def stream() -> Generator[str, None, None]:
+        convergent.current_span().set_output("Hello")
+        yield "Hel"
+        yield "lo"
 
-    generator = stream()
-    next(generator)
-    generator.close()
+    assert read_stream(stream())[0] == "Hel"
 
-    spans = exporter.get_finished_spans()
-    assert spans[-1].name == "stream"
-    assert spans[-1].status.is_ok is True
+    exported = file_spans()["stream"]
+    assert json.loads(_string_attributes(exported)["gen_ai.output.messages"]) == _STREAM_OUTPUT
+    assert exported.get("status", {}).get("code", 0) == 0
 
 
-def test_async_generator_closed_early_does_not_mark_span_as_error(
-    start_sdk: Callable[..., InMemorySpanExporter],
+async def _async_break_on_last(stream: AsyncGenerator[str, None]) -> None:
+    # aclosing() so the close runs now; a bare break leaves it to the loop's
+    # finalizer, which asyncio.run() may cancel before it starts.
+    async with contextlib.aclosing(stream):
+        async for chunk in stream:
+            if chunk == "lo":
+                break
+
+
+async def _async_close_after_first(stream: AsyncGenerator[str, None]) -> None:
+    await anext(stream)
+    await stream.aclose()
+
+
+async def _async_read_to_end(stream: AsyncGenerator[str, None]) -> None:
+    assert [chunk async for chunk in stream] == ["Hel", "lo"]
+
+
+@pytest.mark.parametrize(
+    "read_stream",
+    [
+        pytest.param(_async_break_on_last, id="break-on-last-chunk"),
+        pytest.param(_async_close_after_first, id="aclose-after-first-chunk"),
+        pytest.param(_async_read_to_end, id="read-to-end"),
+    ],
+)
+def test_async_generator_its_reader_stops_keeps_its_output(
+    file_spans: Callable[[], dict[str, dict[str, Any]]],
+    read_stream: Callable[[AsyncGenerator[str, None]], Any],
 ) -> None:
-    exporter = start_sdk()
+    @convergent.observe(name="async-stream", operation="model_call")
+    async def stream() -> AsyncGenerator[str, None]:
+        convergent.current_span().set_output("Hello")
+        yield "Hel"
+        yield "lo"
+
+    asyncio.run(read_stream(stream()))
+
+    exported = file_spans()["async-stream"]
+    assert json.loads(_string_attributes(exported)["gen_ai.output.messages"]) == _STREAM_OUTPUT
+    assert exported.get("status", {}).get("code", 0) == 0
+
+
+def test_stream_that_records_its_output_in_finally_keeps_it(
+    file_spans: Callable[[], dict[str, dict[str, Any]]],
+) -> None:
+    """The common streaming shape: gather chunks and record them in finally.
+    A reader that breaks on the last chunk closes the stream, and the finally
+    must run while the span is still open, sync and async alike."""
+
+    @convergent.observe(name="stream", operation="model_call")
+    def stream() -> Generator[str, None, None]:
+        text = ""
+        try:
+            for chunk in ("Hel", "lo"):
+                text += chunk
+                yield chunk
+        finally:
+            convergent.current_span().set_output(text)
 
     @convergent.observe(name="async-stream", operation="model_call")
-    async def stream() -> AsyncGenerator[int, None]:
-        yield 1
-        yield 2
+    async def async_stream() -> AsyncGenerator[str, None]:
+        text = ""
+        try:
+            for chunk in ("Hel", "lo"):
+                text += chunk
+                yield chunk
+        finally:
+            convergent.current_span().set_output(text)
 
-    async def consume_one_then_abandon() -> None:
-        generator = stream()
-        await generator.__anext__()
-        await generator.aclose()
+    assert _read_and_break_on_last(stream()) == ["Hel", "lo"]
+    asyncio.run(_async_break_on_last(async_stream()))
 
-    asyncio.run(consume_one_then_abandon())
+    spans = file_spans()
+    for name in ("stream", "async-stream"):
+        output = _string_attributes(spans[name])["gen_ai.output.messages"]
+        assert json.loads(output) == _STREAM_OUTPUT, name
 
-    spans = exporter.get_finished_spans()
-    assert spans[-1].name == "async-stream"
-    assert spans[-1].status.is_ok is True
+
+def test_stream_that_fails_or_is_cancelled_drops_its_output(
+    file_spans: Callable[[], dict[str, dict[str, Any]]],
+) -> None:
+    """A raise inside the stream, sync or async, and a cancel before the first
+    chunk still drop the output. The raise marks the span an error (code 2);
+    the cancel leaves the status unset."""
+
+    @convergent.observe(name="raises", operation="model_call")
+    def raises() -> Generator[str, None, None]:
+        convergent.current_span().set_output("Hel")
+        yield "Hel"
+        raise RuntimeError("provider dropped the connection")
+
+    @convergent.observe(name="async-raises", operation="model_call")
+    async def async_raises() -> AsyncGenerator[str, None]:
+        convergent.current_span().set_output("Hel")
+        yield "Hel"
+        raise RuntimeError("provider dropped the connection")
+
+    @convergent.observe(name="cancelled", operation="model_call")
+    async def cancelled() -> AsyncGenerator[str, None]:
+        convergent.current_span().set_output("Hel")
+        await asyncio.sleep(10)
+        yield "Hel"
+
+    with pytest.raises(RuntimeError):
+        list(raises())
+
+    async def drive() -> None:
+        with pytest.raises(RuntimeError):
+            async for _ in async_raises():
+                pass
+        task = asyncio.ensure_future(anext(cancelled()))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(drive())
+
+    spans = file_spans()
+    for name, status in (("raises", 2), ("async-raises", 2), ("cancelled", 0)):
+        assert "gen_ai.output.messages" not in _string_attributes(spans[name]), name
+        assert spans[name].get("status", {}).get("code", 0) == status, name
 
 
 def test_cancelled_task_does_not_mark_span_as_error(
@@ -237,7 +417,7 @@ def test_agent_runs_carry_their_name_and_version_as_span_attributes(
     start_sdk: Callable[..., InMemorySpanExporter],
 ) -> None:
     """The standard GenAI keys are where agent identity lives, and the process
-    Resource carries the deployment rather than any agent name."""
+    Resource carries no agent name."""
     exporter = start_sdk(release="v9")
 
     @convergent.observe(name="support-agent", operation="agent_run")
@@ -250,7 +430,6 @@ def test_agent_runs_carry_their_name_and_version_as_span_attributes(
     assert attributes["gen_ai.agent.name"] == "support-agent"
     assert attributes["gen_ai.agent.version"] == "v9"
     resource = dict(span.resource.attributes)
-    assert resource["convergent.deployment.id"] == "dep_test"
     assert "convergent.agent.name" not in resource
     assert not any(key.startswith("convergent.agent.") for key in attributes)
 
@@ -361,7 +540,6 @@ def test_manual_spans_follow_otel_genai_names_and_attributes(
     assert agent_attributes["gen_ai.operation.name"] == "invoke_agent"
     assert agent_attributes["gen_ai.agent.name"] == "agent"
     assert agent_attributes["gen_ai.agent.version"] == "2026.07.24"
-    assert agent_attributes["convergent.semantic.version"]
     assert "always captured" in str(agent_attributes["gen_ai.input.messages"])
     assert "always captured" in str(agent_attributes["gen_ai.output.messages"])
     assert tool_span.name == "execute_tool lookup_account"
@@ -396,20 +574,6 @@ def test_the_release_never_overwrites_an_agent_version_the_span_already_has(
     assert "gen_ai.agent.name" not in by_name["invoke_agent unversioned"], (
         "a nameless framework agent stays nameless; ingest infers it"
     )
-
-
-def test_spans_carry_the_registered_deployment_id_as_an_attribute(
-    start_sdk: Callable[..., InMemorySpanExporter],
-) -> None:
-    """The deployment identity rides every GenAI span, not only the Resource.
-    An attached provider's Resource is the caller's and frozen, so the span
-    attribute is the only carrier that survives attach mode."""
-    exporter = start_sdk(release="1.2.3")
-    with convergent.span(name="gpt-5.5", operation="model_call"):
-        pass
-    (span,) = exporter.get_finished_spans()
-    assert span.attributes is not None
-    assert span.attributes["convergent.deployment.id"] == "dep_test"
 
 
 def test_the_handle_reports_the_ids_the_exported_span_carries(
@@ -486,7 +650,7 @@ def test_a_bad_start_time_attribute_is_dropped_and_the_span_still_lands(
     exporter = start_sdk()
     hostile: dict[Any, Any] = {
         "gen_ai.agent.name": "attacker",
-        "convergent.execution.id": "attacker",
+        "convergent.session.id": "attacker",
         1: "not a string key",
         "nested": {"not": "a scalar"},
         "fine": "kept",
@@ -498,52 +662,11 @@ def test_a_bad_start_time_attribute_is_dropped_and_the_span_still_lands(
 
     attributes = exporter.get_finished_spans()[-1].attributes or {}
     assert attributes["gen_ai.agent.name"] == "agent", "identity is not overwritable"
-    assert attributes["convergent.execution.id"] != "attacker"
+    assert "convergent.session.id" not in attributes
     assert 1 not in attributes
     assert "nested" not in attributes
     assert attributes["fine"] == "kept"
     assert [r for r in caplog.records if "ignored the attribute" in r.getMessage()]
-
-
-def test_execution_id_is_shared_by_nested_agent_work_but_not_concurrent_runs(
-    start_sdk: Callable[..., InMemorySpanExporter],
-) -> None:
-    exporter = start_sdk()
-
-    @convergent.observe(name="child", operation="tool_call")
-    def child() -> None:
-        return None
-
-    @convergent.observe(name="run", operation="agent_run")
-    def run() -> None:
-        child()
-
-    run()
-    first = exporter.get_finished_spans()
-    child_attributes = first[0].attributes
-    run_attributes = first[1].attributes
-    assert child_attributes is not None
-    assert run_attributes is not None
-    assert child_attributes["convergent.execution.id"] == run_attributes["convergent.execution.id"]
-    assert "convergent.execution.id" not in first[0].resource.attributes
-    assert first[0].context is not None
-    assert child_attributes["convergent.execution.id"] == f"{first[0].context.trace_id:032x}", (
-        "the execution id is the trace id, which is what carries it between processes"
-    )
-
-    async def concurrent() -> None:
-        await asyncio.gather(
-            convergent.observe(name="one", operation="agent_run")(asyncio.sleep)(0),
-            convergent.observe(name="two", operation="agent_run")(asyncio.sleep)(0),
-        )
-
-    asyncio.run(concurrent())
-    ids = []
-    for finished_span in exporter.get_finished_spans()[-2:]:
-        attributes = finished_span.attributes
-        assert attributes is not None
-        ids.append(attributes["convergent.execution.id"])
-    assert ids[0] != ids[1]
 
 
 def test_nothing_convergent_is_left_in_otel_baggage(
@@ -701,14 +824,10 @@ def test_reserved_attributes_cannot_be_overwritten(
     exporter = start_sdk()
 
     with convergent.span(name="agent", operation="agent_run") as handle:
-        handle.set_attribute("convergent.execution.id", "attacker")
-        handle.set_attribute("convergent.semantic.version", "attacker")
         handle.set_attribute("gen_ai.operation.name", "attacker")
     span = exporter.get_finished_spans()[-1]
     attributes = span.attributes
     assert attributes is not None
-    assert attributes["convergent.execution.id"] != "attacker"
-    assert attributes["convergent.semantic.version"] != "attacker"
     assert attributes["gen_ai.operation.name"] == "invoke_agent"
 
     with convergent.span(name="lookup", operation="tool_call") as tool:
@@ -999,25 +1118,101 @@ def test_an_explicit_otel_length_limit_still_applies(monkeypatch: pytest.MonkeyP
     assert _core._span_limits().max_span_attribute_length is None
 
 
-def test_an_object_whose_repr_raises_does_not_escape_set_input(
+def test_content_that_is_not_portable_json_is_dropped_with_one_warning(
     start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The one contract this SDK makes.
-
-    ``json.dumps(default=repr)`` runs the caller's ``__repr__``, so a raising
-    ``__repr__`` must not propagate out of ``set_input`` into the caller's code.
-    """
+    """No ``repr`` fallback: the TypeScript SDK has no ``repr``, so the same
+    object would be stored two ways. Each label is dropped whole, never raised,
+    and the first drop logs one warning."""
     exporter = start_sdk()
 
     class Hostile:
         def __repr__(self) -> str:
             raise ValueError("this must not reach the caller")
 
-    with convergent.span(name="agent", operation="agent_run") as handle:
-        handle.set_input({"payload": Hostile()})
-        handle.set_output([{"role": "assistant", "content": Hostile()}])
+    circular: dict[str, Any] = {}
+    circular["self"] = circular
+    content_keys = {
+        "gen_ai.input.messages",
+        "gen_ai.output.messages",
+        "gen_ai.tool.call.arguments",
+        "gen_ai.tool.call.result",
+        "convergent.agent.tools",
+        "convergent.content.source",
+    }
 
-    assert exporter.get_finished_spans()[-1].attributes is not None
+    with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
+        with convergent.span(
+            name="agent", operation="agent_run", tools=[{"name": "lookup", "limit": float("nan")}]
+        ) as handle:
+            handle.set_input({"payload": Hostile()})
+            handle.set_output([{"role": "assistant", "content": circular}])
+        with convergent.span(name="lookup", operation="tool_call") as handle:
+            handle.set_input({"rows": {1, 2}})
+            handle.set_output(float("inf"))
+
+    for span in exporter.get_finished_spans():
+        assert content_keys.isdisjoint(span.attributes or {}), span.name
+    warned = [r for r in caplog.records if "not portable JSON" in r.getMessage()]
+    assert [r.levelno for r in warned] == [logging.WARNING]
+
+
+def test_an_empty_model_name_is_dropped_with_one_warning(
+    start_sdk: Callable[..., InMemorySpanExporter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A blank model names nothing, so it is not recorded; a real one is."""
+    exporter = start_sdk()
+    with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
+        for model in ("", "  ", "gpt-5.5"):
+            with convergent.span(name="answer", operation="model_call", model=model):
+                pass
+
+    spans = exporter.get_finished_spans()
+    models = [(span.attributes or {}).get("gen_ai.request.model") for span in spans]
+    assert models == [None, None, "gpt-5.5"]
+    warned = [r for r in caplog.records if "empty model name" in r.getMessage()]
+    assert [r.levelno for r in warned] == [logging.WARNING]
+
+
+def test_a_pydantic_model_is_recorded_as_its_json_dump(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """Python model clients return pydantic models where TypeScript ones return
+    plain objects, so a model lands as ``model_dump(mode="json")`` would: the
+    same JSON the TypeScript SDK records for the plain object, at any depth. A
+    ``model_dump`` that raises is the caller's code, and is dropped, not raised."""
+    exporter = start_sdk()
+
+    class Message(pydantic.BaseModel):
+        role: str
+        content: str
+        sent_at: datetime
+
+    class Broken:
+        def model_dump(self, **_: Any) -> dict[str, Any]:
+            raise ValueError("this must not reach the caller")
+
+    sent_at = datetime(2026, 11, 3, tzinfo=UTC)
+    reply = Message(role="assistant", content="Paid.", sent_at=sent_at)
+    plain = {"role": "assistant", "content": "Paid.", "sent_at": "2026-11-03T00:00:00Z"}
+
+    with convergent.span(name="answer", operation="model_call") as handle:
+        handle.set_input([reply])
+        handle.set_output(reply)
+    with convergent.span(name="lookup", operation="tool_call") as handle:
+        handle.set_input({"message": reply})
+        handle.set_output(Broken())
+
+    answer, lookup = exporter.get_finished_spans()
+    attributes = answer.attributes or {}
+    assert json.loads(cast(str, attributes["gen_ai.input.messages"])) == [plain]
+    output = json.loads(cast(str, attributes["gen_ai.output.messages"]))
+    assert json.loads(output[0]["parts"][0]["content"]) == plain
+    attributes = lookup.attributes or {}
+    assert json.loads(cast(str, attributes["gen_ai.tool.call.arguments"])) == {"message": plain}
+    assert "gen_ai.tool.call.result" not in attributes
 
 
 def test_a_caller_supplied_message_list_passes_through(
@@ -1061,7 +1256,6 @@ def test_every_operation_maps_to_its_semconv_value(
 
     attributes = exporter.get_finished_spans()[-1].attributes or {}
     assert attributes["gen_ai.operation.name"] == expected
-    assert attributes["convergent.execution.id"], "a custom operation is still an execution"
 
 
 @pytest.mark.parametrize(
@@ -1185,13 +1379,13 @@ def test_a_rejected_attribute_is_reported_and_dropped(
     with caplog.at_level(logging.ERROR, logger="convergent.sdk"):
         with convergent.span(name="agent", operation="agent_run") as handle:
             handle.set_attribute("gen_ai.agent.name", "attacker")
-            handle.set_attribute("convergent.execution.id", "attacker")
+            handle.set_attribute("convergent.session.id", "attacker")
             handle.set_attribute("nested", cast(Any, {"not": "a scalar"}))
             handle.set_attribute("fine", "kept")
 
     attributes = exporter.get_finished_spans()[-1].attributes or {}
     assert attributes["gen_ai.agent.name"] == "agent", "identity is not overwritable"
-    assert attributes["convergent.execution.id"] != "attacker"
+    assert "convergent.session.id" not in attributes
     assert "nested" not in attributes
     assert attributes["fine"] == "kept"
 
@@ -1395,14 +1589,14 @@ def test_current_span_enforces_the_reserved_key_guard(
     def run() -> None:
         handle = convergent.current_span()
         handle.set_attribute("gen_ai.agent.name", "attacker")
-        handle.set_attribute("convergent.execution.id", "attacker")
+        handle.set_attribute("convergent.session.id", "attacker")
         handle.set_attribute("fine", "kept")
 
     run()
 
     attributes = exporter.get_finished_spans()[-1].attributes or {}
     assert attributes["gen_ai.agent.name"] == "support-agent", "identity is not overwritable"
-    assert attributes["convergent.execution.id"] != "attacker"
+    assert "convergent.session.id" not in attributes
     assert attributes["fine"] == "kept"
 
 

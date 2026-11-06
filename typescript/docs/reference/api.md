@@ -282,6 +282,11 @@ then withholds it and its children.
 `systemInstructions` and `tools` apply only to an agent run. On other
 operations the SDK ignores them and logs a warning.
 
+A name outside 1 to 128 characters, or an operation missing from the
+[Operations](#operations) table, logs a warning once and the span is still
+recorded. Validation happens at ingest. `observe()`, `agent()`, and `tool()`
+check when they wrap the function; `span()` checks on each call.
+
 ### agent()
 
 ```ts
@@ -384,9 +389,23 @@ const text = await span({ name: "gpt-5.5", operation: "model_call" }, async (cal
 ```
 
 When the callback throws or its Promise rejects, the span's status becomes an
-error and the error is thrown again unchanged. The span records only the
-error's class name. It records no message and no stack, and nothing from a
-thrown string.
+error and the error is thrown again unchanged. An error whose `name` is
+`AbortError` leaves the status unset, because the caller stopped the call
+rather than it failing. The SDK checks only that name, so what the aborted call
+rejects with decides it:
+
+- Node's own modules that take a signal, such as `timers/promises`, `fs`,
+  `events` and `child_process`, fail with an `AbortError` even for a timeout
+  or a custom reason, so the status stays unset.
+- `fetch` rejects with an `AbortError` only when its signal is aborted without
+  a reason. A `TimeoutError` from `AbortSignal.timeout()`, or a custom reason
+  passed to `controller.abort(reason)` that isn't itself named `AbortError`,
+  marks the span as an error.
+
+The span records only an `Error`'s `name`, which isn't always its class: a
+timeout's `name` is `TimeoutError`, its class `DOMException`. It records no
+message and no stack. A thrown string records no name or message, though it
+still marks the span as an error.
 
 #### Operations
 
@@ -403,7 +422,11 @@ thrown string.
 | `generate_content` | `generate_content` | |
 | any other string | that string | |
 
-On any operation, `model` writes `gen_ai.request.model`. Every operation other
+On any operation, `model` writes `gen_ai.request.model`.
+
+- An empty or blank `model` is not written, and the first one logs a warning.
+
+Every operation other
 than `agent_run` and `tool_call` keeps the name you gave it, so
 `span({ name: "gpt-5.5", operation: "model_call" }, ...)` appears as `gpt-5.5`.
 [Attributes](../../../docs/attributes.md) lists every key Convergent reads.
@@ -416,7 +439,7 @@ returns one for the active span.
 | Member | What it does |
 | --- | --- |
 | `setInput(value)` | writes `gen_ai.input.messages`, or `gen_ai.tool.call.arguments` on a tool call |
-| `setOutput(value)` | writes `gen_ai.output.messages`, or `gen_ai.tool.call.result` on a tool call |
+| `setOutput(value)` | writes `gen_ai.output.messages`, or `gen_ai.tool.call.result` on a tool call, when the call succeeds |
 | `setToolCallId(id)` | writes `gen_ai.tool.call.id`, which pairs a model's request for a tool with the call itself |
 | `setAttribute(key, value)` | writes one attribute of your own |
 | `setContextAttributes(pairs)` | marks this span and every span started inside it after the call, for the span filters |
@@ -433,6 +456,33 @@ and any other value as compact JSON. On other operations, an array of message
 objects that each have a `role` is written as JSON. Any other value becomes
 one text message, with role `user` for input and `assistant` for output. The
 SDK does not read your function's arguments or return value for you.
+
+**What content the SDK keeps.** These rules apply to `setInput()`,
+`setOutput()`, and `tools`:
+
+- A value must be portable JSON: `null`, a boolean, a finite number, a string,
+  or arrays and plain objects of these.
+- A property set to `undefined` is left out, as `JSON.stringify` leaves it out.
+- Any other value is dropped whole, and the first one logs a warning. That
+  includes a class instance, a `Date`, `Map`, or `Set`, `NaN` or `Infinity`, a
+  `bigint`, an array holding `undefined` or a hole, an object that contains
+  itself, and an object with a function as a property, such as a tool
+  definition that carries its `execute` function.
+- To keep such a value, convert it first, such as `date.toISOString()`.
+- A dropped input leaves the span as it was. If an earlier `setInput()` call
+  on the same span recorded a value, that value stays, along with
+  `convergent.content.source`.
+- A dropped output also clears an output an earlier `setOutput()` call
+  recorded, so the span ends with no output. On a span another library opened,
+  an earlier output was already written, so it stays.
+
+`setOutput()` holds the output until the span ends:
+
+- When the callback returns, or its Promise resolves, the output is written.
+- When it throws or rejects, aborts included, the output is dropped. An error
+  still marks the span's status as an error, and an abort still leaves it unset.
+- On a span another library opened, the SDK does not see the span end, so the
+  output is written at once.
 
 **setToolCallId().** Takes a string of 1 to 256 characters and keeps it as
 given, spaces included. The first invalid ID logs a warning that does not show
@@ -522,7 +572,7 @@ already in progress. Call it after the traced work has finished. It never
 throws.
 
 ```ts
-const drained = await flush({ timeoutMs: 5000 }); // { ok, elapsedMs }
+const drained = await flush({ timeoutMs: 5000 }); // { ok, dropped, elapsedMs }
 ```
 
 **Returns:** a [FlushResult](#flushresult).
@@ -540,22 +590,25 @@ default.
 
 Every destination is flushed even when another one fails. For a `File`
 destination, `flush()` also syncs the file to disk. Before setup, or after an
-`invalid_config`, `flush()` does nothing and returns `{ ok: true, elapsedMs: 0 }`.
+`invalid_config`, `flush()` does nothing and returns `{ ok: true, dropped: 0, elapsedMs: 0 }`.
 
 #### FlushResult
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `ok` | `boolean` | every destination finished within `timeoutMs`. With `uploads: true`, also no upload is left |
+| `dropped` | `number` | spans thrown away since the last call because a destination's send queue was full, counted once per destination |
 | `elapsedMs` | `number` | how long it took, in whole milliseconds |
 
 A failure or a timeout gives `ok: false` and logs a warning the first time.
 
 `ok` does not prove delivery. If the receiver answers HTTP 400, a batch that
 `flush()` sends gives `ok: false`. A batch that was already sent in the
-background gives `ok: true`, and the failure shows only as a warning. Spans
-dropped earlier from a full queue are not counted. The result has no count of
-pending or dropped spans, because OpenTelemetry for Node does not expose them.
+background gives `ok: true`, and the failure shows only as a warning. Unlike
+Python's `dropped`, the count leaves out batches an export failed to deliver,
+and a full queue does not turn `ok` off. Each call reads and resets the count.
+The result has no count of pending spans, because OpenTelemetry for Node does
+not expose it.
 
 Keep in mind:
 

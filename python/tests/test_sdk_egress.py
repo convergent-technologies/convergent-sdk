@@ -11,10 +11,10 @@ from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, format_span_id
 
 import convergent
-from convergent import _core, _egress, _registry, _transport
+from convergent import _core, _egress, _transport
 
 
 @pytest.fixture(autouse=True)
@@ -32,11 +32,6 @@ def start_sdk(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., InMemor
 
     def start(*, batch: bool = False, **kwargs: object) -> InMemorySpanExporter:
         exporter = InMemorySpanExporter()
-        monkeypatch.setattr(
-            _registry,
-            "post_json",
-            lambda *a, **k: {"deployment_id": "dep_test", "is_new": True},
-        )
         # Only a real BatchSpanProcessor carries the private queue state flush()
         # reads, so a test about flush() has to ask for one.
         processor = BatchSpanProcessor(exporter) if batch else SimpleSpanProcessor(exporter)
@@ -89,6 +84,68 @@ def test_a_declared_agents_run_is_sent_including_a_plain_child(
             pass
 
     assert _names(exporter) == {"invoke_agent support-agent", "SELECT users"}
+
+
+def test_stamp_does_not_name_a_filtered_parent_agent(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    exporter = start_sdk(agents=["support-agent"])
+    provider = _core.active_provider()
+    assert provider is not None
+    tracer = provider.get_tracer("their.framework")
+
+    with tracer.start_as_current_span(
+        "invoke_agent private-agent",
+        attributes={"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "private-agent"},
+    ):
+        with tracer.start_as_current_span(
+            "invoke_agent support-agent",
+            attributes={
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.agent.name": "support-agent",
+            },
+        ):
+            pass
+
+    spans = exporter.get_finished_spans()
+    assert [span.name for span in spans] == ["invoke_agent support-agent"]
+    attrs = spans[0].attributes or {}
+    span_context = spans[0].get_span_context()
+    assert span_context is not None
+    span_id = format_span_id(span_context.span_id)
+    assert attrs["convergent.invocation.span_id"] == span_id
+    assert attrs["convergent.root_invocation.span_id"] == span_id
+    assert "convergent.parent_invocation.span_id" not in attrs
+
+
+def test_a_filtered_agent_between_declared_agents_passes_the_stamp_through(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    exporter = start_sdk(agents=["support-agent", "billing-agent"])
+    provider = _core.active_provider()
+    assert provider is not None
+    tracer = provider.get_tracer("their.framework")
+
+    def agent(name: str) -> dict[str, str]:
+        return {"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": name}
+
+    with tracer.start_as_current_span(
+        "invoke_agent support-agent", attributes=agent("support-agent")
+    ) as outer:
+        with tracer.start_as_current_span(
+            "invoke_agent private-agent", attributes=agent("private-agent")
+        ):
+            with tracer.start_as_current_span(
+                "invoke_agent billing-agent", attributes=agent("billing-agent")
+            ):
+                pass
+
+    outer_id = format_span_id(outer.get_span_context().span_id)
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    assert set(spans) == {"invoke_agent support-agent", "invoke_agent billing-agent"}
+    attrs = spans["invoke_agent billing-agent"].attributes or {}
+    assert attrs["convergent.root_invocation.span_id"] == outer_id
+    assert attrs["convergent.parent_invocation.span_id"] == outer_id
 
 
 def test_an_undeclared_agents_whole_subtree_is_dropped(
@@ -313,38 +370,10 @@ def test_flush_reads_the_exporter_and_not_the_filter_in_front_of_it(
     assert convergent.flush().ok, "a shut-down exporter is skipped, not reported failed"
 
 
-def test_declared_agents_are_registered_and_the_server_answer_wins(
+def test_status_reports_the_declared_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    sent: dict[str, object] = {}
-
-    def capture(url: str, payload: dict[str, object], **_: object) -> dict[str, object]:
-        sent.update(payload)
-        return {"deployment_id": "dep_1", "is_new": True, "agents": ["support-agent"]}
-
-    monkeypatch.setattr(_registry, "post_json", capture)
-    monkeypatch.setattr(
-        _transport, "build_processor", lambda **_: SimpleSpanProcessor(InMemorySpanExporter())
-    )
-    status = convergent.init(
-        api_key="test-key",  # pragma: allowlist secret
-        endpoint="https://example.test",
-        release="r1",
-        agents=["support-agent", "billing-agent"],
-    )
-
-    assert sent["agents"] == ["support-agent", "billing-agent"]
-    assert status.agents == ["support-agent"], "the server says which names took"
-
-
-def test_status_falls_back_to_the_declared_names(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A server that does not answer with a linked set is not the same as one that
-    linked nothing, so the declared names stand."""
-    monkeypatch.setattr(
-        _registry, "post_json", lambda *a, **k: {"deployment_id": "dep_1", "is_new": True}
-    )
+    """``Status.agents`` reports the names this process declared."""
     monkeypatch.setattr(
         _transport, "build_processor", lambda **_: SimpleSpanProcessor(InMemorySpanExporter())
     )

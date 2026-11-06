@@ -48,3 +48,9 @@ callback that was set earlier.
 Convergent also reads spans from LiteLLM's newer `otel_v2` callback. If you use
 it, set `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=span_and_event` to
 record prompts and completions.
+
+The `otel` callback opens a `raw_gen_ai_request` span under each model call
+and copies the provider request into it. For a Responses API call, that copy
+repeats the request messages the model call span already holds. When the model
+call span holds every message whole, the SDK leaves the copy out, so the
+messages are sent once. File and console destinations leave it out too.

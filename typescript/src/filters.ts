@@ -5,6 +5,11 @@ import type { ReadableSpan, Span } from "@opentelemetry/sdk-trace-base";
 import { reservedAttributeKeys } from "./attributes.js";
 import { reportOnce } from "./diagnostics.js";
 import { typeName } from "./flags.js";
+import {
+  CONVERGENT_ATTRIBUTES_PREFIX,
+  CONVERGENT_SESSION_ID,
+  GEN_AI_AGENT_NAME,
+} from "./telemetry-keys.js";
 
 export type FilterValue = string | number | boolean;
 export type SpanAttributeRules = Readonly<Record<string, FilterValue | readonly FilterValue[]>>;
@@ -51,8 +56,7 @@ const agentNameLimit = 512;
 const agentLimit = 256;
 // Exact names or dotted children, so a "litellm_proxy" tracer is not litellm.
 const modelScopes = ["convergent.sdk", "pydantic-ai", "openinference", "litellm"];
-const sessionKeys = new Set(["gen_ai.conversation.id", "session.id", "convergent.session.id"]);
-const markPrefix = "convergent.attributes.";
+const sessionKeys = new Set(["gen_ai.conversation.id", "session.id", CONVERGENT_SESSION_ID]);
 
 const isScalar = (value: unknown): value is FilterValue =>
   typeof value === "string" || typeof value === "number" || typeof value === "boolean";
@@ -252,7 +256,7 @@ export function agentDecision(
 ): boolean {
   if (!agents) return true;
   if (agents.size === 0) return false;
-  const name = span.attributes["gen_ai.agent.name"];
+  const name = span.attributes[GEN_AI_AGENT_NAME];
   if (typeof name === "string" && name) return agents.has(name);
   const parentContext = span.parentSpanContext;
   if (!parentContext) return false;
@@ -263,7 +267,7 @@ export function agentDecision(
 
 export function markAttributes(attributes: Attributes): Attributes {
   return Object.fromEntries(
-    Object.entries(attributes).filter(([key]) => key.startsWith(markPrefix)),
+    Object.entries(attributes).filter(([key]) => key.startsWith(CONVERGENT_ATTRIBUTES_PREFIX)),
   );
 }
 
@@ -273,14 +277,16 @@ export function markAttributes(attributes: Attributes): Attributes {
 export function spanMarks(attributes: Attributes, metadata: SpanMetadata | undefined): Attributes {
   const marks: Attributes = { ...metadata?.pairs };
   for (const [key, value] of Object.entries(markAttributes(attributes))) {
-    const name = key.slice(markPrefix.length);
+    const name = key.slice(CONVERGENT_ATTRIBUTES_PREFIX.length);
     if (!(name in marks) || metadata?.startMarks?.[key] !== value) marks[name] = value;
   }
   return marks;
 }
 
 export function exportMarks(marks: Attributes): Attributes {
-  return Object.fromEntries(Object.entries(marks).map(([key, value]) => [markPrefix + key, value]));
+  return Object.fromEntries(
+    Object.entries(marks).map(([key, value]) => [CONVERGENT_ATTRIBUTES_PREFIX + key, value]),
+  );
 }
 
 // Request scope: the marks an SDK span hands to the spans started inside it.
