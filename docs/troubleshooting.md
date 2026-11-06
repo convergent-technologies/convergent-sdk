@@ -132,10 +132,6 @@ process.once("SIGTERM", () => {
 `round trip  failed (http_401)`. After the server answers 401 or 403, the SDK
 stops sending for the life of the process. Fix the key, then restart.
 
-In Python, the first log line for a bad key is often
-`deployment registration failed`. It looks like a version problem. Trust
-`check()` instead.
-
 ### An OTLP headers variable replaced the key (Python)
 
 If a good key gets a 401, check `OTEL_EXPORTER_OTLP_HEADERS` and
@@ -280,13 +276,6 @@ OpenTelemetry drops the oldest one, which can be the mark. Raise
 
 A value that changes per request reached an agent name. Keep names stable, like
 a class name, and put the changing part in an attribute.
-
-## Traces have no version (Python)
-
-The SDK registers the deployment in the background after the first span, so it
-can take a moment to appear. If it never does, look for
-`deployment registration failed` in your logs. Traces still arrive with your
-release.
 
 ## Prompts are missing from the spans
 

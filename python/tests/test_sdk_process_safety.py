@@ -15,11 +15,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import convergent
-from convergent import _core, _otel, _semantic, _transport
+from convergent import _core, _semantic, _transport
 
 
 @pytest.fixture(autouse=True)
@@ -27,14 +25,6 @@ def reset_sdk() -> Iterator[None]:
     _core._reset_for_tests()
     yield
     _core._reset_for_tests()
-
-
-def _armed_processor(monkeypatch: pytest.MonkeyPatch) -> _otel.ConvergentSpanProcessor:
-    """A processor with the credentials it needs, and nothing on the network."""
-    monkeypatch.setattr(
-        _transport, "build_processor", lambda **_: SimpleSpanProcessor(InMemorySpanExporter())
-    )
-    return _otel.ConvergentSpanProcessor(api_key="k-fork", release="r1")  # pragma: allowlist secret
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
@@ -208,38 +198,6 @@ def test_exit_drain_still_shuts_every_processor_down_after_the_budget(
     _core._drain_all_processors()
 
     assert shutdowns == [0, 1, 2]
-
-
-def test_a_span_processor_is_repaired_after_fork_too(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A child that inherited the gate locked would block on every span start. It
-    also inherits the flag saying registration is under way, and the thread running
-    that registration does not exist in the child, so the child gets to start its
-    own."""
-    processor = _armed_processor(monkeypatch)
-    gate = processor._gate
-    gate.acquire()
-    processor._registration_started = True
-
-    _otel._reset_after_fork()
-
-    assert processor._gate is not gate
-    assert processor._gate.acquire(timeout=1), "the replacement is already held"
-    processor._gate.release()
-    assert not processor._registration_started, "the child registers for itself"
-    gate.release()
-
-
-def test_a_fork_after_registration_landed_does_not_register_again(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The deployment is already known, and it is the same one in the child."""
-    processor = _armed_processor(monkeypatch)
-    processor._registration_started = True
-    processor._registered = True
-
-    _otel._reset_after_fork()
-
-    assert processor._registration_started
 
 
 def test_the_transport_locks_are_reset_after_fork_too() -> None:

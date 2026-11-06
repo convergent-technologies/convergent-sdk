@@ -9,6 +9,8 @@ import {
   type StatusReason,
 } from "./configuration.js";
 import { lastSetupFailure } from "./failures.js";
+import { CHECK_PATH } from "./receiver-routes.js";
+import { userAgent } from "./version.js";
 
 const WIDTH = 80;
 const LABEL_WIDTH = 14;
@@ -256,7 +258,11 @@ async function getJson(url: string, apiKey: string): Promise<Record<string, unkn
     // this request or its authorization header.
     response = await context.with(suppressTracing(context.active()), () =>
       fetch(url, {
-        headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: "application/json",
+          "User-Agent": userAgent,
+        },
         // A redirect would carry the key to another address.
         redirect: "manual",
         signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -301,7 +307,7 @@ export async function check(): Promise<Report> {
   const started = performance.now();
   let body: Record<string, unknown>;
   try {
-    body = await getJson(`${endpoint}/v1/check${query}`, credentials.apiKey);
+    body = await getJson(`${endpoint}${CHECK_PATH}${query}`, credentials.apiKey);
   } catch (error) {
     if (error instanceof CheckFailure) {
       return new Report({ status, roundTrip: error.reason, endpoint });

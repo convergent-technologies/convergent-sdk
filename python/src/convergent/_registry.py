@@ -1,32 +1,23 @@
-"""The SDK's HTTP calls to the control plane: deployment registration and the
-``check()`` round trip.
+"""The SDK's HTTP calls to the control plane: the ``check()`` round trip, and the
+opener and backoff that file uploads share.
 
-``init()`` must finish its POST before it builds the tracer provider, because an
-OpenTelemetry ``Resource`` is immutable once constructed -- a ``deployment_id``
-that arrived later could never be attached to it.
-
-Stdlib ``urllib`` on purpose: ``urlopen`` makes exactly one attempt, and taking on
-``requests`` or ``tenacity`` to retry a single POST is not worth a dependency in a
-customer's process. Full jitter keeps a fleet restarting after an outage from
-retrying in lockstep. Retries need no idempotency key because the server upserts
-on ``(organization_id, fingerprint)``. Redirects are refused so the Bearer key is
-never re-sent to a redirect target.
+Stdlib ``urllib`` on purpose: taking on ``requests`` is not worth a dependency in
+a customer's process. Full jitter keeps a fleet restarting after an outage from
+retrying in lockstep. Redirects are refused so the Bearer key is never re-sent to
+a redirect target.
 """
 
 from __future__ import annotations
 
+import functools
 import http.client
 import json
-import logging
 import random
-import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 
-logger = logging.getLogger(__name__)
-
-__all__ = ["RegistrationError", "backoff_delay", "get_json", "post_json"]
+__all__ = ["RegistrationError", "backoff_delay", "get_json"]
 
 MAX_RESPONSE_BYTES = 1 * 1024 * 1024
 
@@ -34,19 +25,20 @@ MAX_RESPONSE_BYTES = 1 * 1024 * 1024
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuse redirects so the Bearer key never re-sends to a redirect target.
+@functools.cache
+def _opener() -> urllib.request.OpenerDirector:
+    # Temporal's workflow sandbox refuses urllib.request use while importing the SDK.
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        """Refuse redirects so the Bearer key never re-sends to a redirect target.
 
-    Returning ``None`` from ``redirect_request`` makes urllib surface the 3xx as
-    an ``HTTPError`` instead of following it -- which ``post_json`` then treats as
-    a terminal (non-retryable) status.
-    """
+        Returning ``None`` from ``redirect_request`` makes urllib surface the 3xx as
+        an ``HTTPError`` instead of following it, which callers treat as terminal.
+        """
 
-    def redirect_request(self, *args: object, **kwargs: object) -> None:
-        return None
+        def redirect_request(self, *args: object, **kwargs: object) -> None:
+            return None
 
-
-_OPENER = urllib.request.build_opener(_NoRedirect)
+    return urllib.request.build_opener(_NoRedirect)
 
 
 class RegistrationError(RuntimeError):
@@ -54,80 +46,8 @@ class RegistrationError(RuntimeError):
     safe to log -- never carries the response body (which can echo the request)."""
 
     def __init__(self, reason: str) -> None:
-        super().__init__(f"convergent registration failed: {reason}")
+        super().__init__(f"convergent request failed: {reason}")
         self.reason = reason
-
-
-def post_json(
-    url: str,
-    payload: dict[str, object],
-    *,
-    headers: dict[str, str],
-    max_attempts: int = 3,
-    base_backoff: float = 0.5,
-    max_backoff: float = 5.0,
-    deadline: float = 5.0,
-    attempt_timeout: float = 5.0,
-    sleep: Callable[[float], None] | None = None,
-    monotonic: Callable[[], float] | None = None,
-    rng: Callable[[], float] | None = None,
-) -> dict[str, object]:
-    """POST ``payload`` as JSON, retrying transient failures within bounds.
-
-    Returns the parsed JSON object on a 2xx, and raises ``RegistrationError`` for
-    everything else -- retrying only a connection error, a timeout, a 429, or a
-    5xx. ``deadline`` bounds the retry *loop*, not one attempt: ``attempt_timeout``
-    is urllib's per-socket-operation timeout, so a server that trickles bytes just
-    under it can keep a single attempt alive past the deadline. Accepted here
-    because the endpoint is either Convergent's managed ingest or a receiver the
-    caller runs themselves.
-
-    ``sleep`` / ``monotonic`` / ``rng`` resolve at call time so a test can inject a
-    fake clock and still monkeypatch ``time.sleep`` at the boundary.
-    """
-    sleep = sleep or time.sleep
-    monotonic = monotonic or time.monotonic
-    rng = rng or random.random
-
-    try:
-        data = json.dumps(payload).encode("utf-8")
-    except (TypeError, ValueError):
-        # Keep the "raises only RegistrationError" contract total for every
-        # caller of this reusable primitive, not just today's JSON-safe body.
-        raise RegistrationError("bad_payload") from None
-    request_headers = {**headers, "Content-Type": "application/json"}
-    deadline_at = monotonic() + deadline
-    reason = "unavailable"
-
-    for attempt in range(max_attempts):
-        remaining = deadline_at - monotonic()
-        if remaining <= 0:
-            break
-        try:
-            # Built inside the try: a malformed url raises ValueError from
-            # Request() itself, not from the opener.
-            request = urllib.request.Request(url, data=data, headers=request_headers, method="POST")
-            with _OPENER.open(request, timeout=min(attempt_timeout, remaining)) as response:
-                return _parse(response.read(MAX_RESPONSE_BYTES + 1))
-        except urllib.error.HTTPError as exc:
-            if exc.code not in _RETRYABLE_STATUS:
-                raise RegistrationError(f"http_{exc.code}") from None
-            reason = f"http_{exc.code}"
-        except ValueError:
-            # A malformed endpoint (e.g. "unknown url type") never improves on
-            # retry -- terminal, and it must not escape as a raw ValueError.
-            raise RegistrationError("bad_url") from None
-        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
-            reason = type(exc).__name__
-
-        if attempt == max_attempts - 1:
-            break
-        delay = backoff_delay(attempt, base=base_backoff, cap=max_backoff, rng=rng)
-        if monotonic() + delay > deadline_at:
-            break
-        sleep(delay)
-
-    raise RegistrationError(reason)
 
 
 def backoff_delay(
@@ -140,18 +60,18 @@ def backoff_delay(
 def get_json(url: str, *, headers: dict[str, str], timeout: float = 5.0) -> dict[str, object]:
     """GET ``url`` and return the JSON object it answered with, in one attempt.
 
-    This shares ``post_json``'s opener, so a redirect is refused rather than followed
-    with the Bearer key attached. It also raises the same ``RegistrationError``, so a
-    caller reads one coarse ``reason`` whichever way the call failed.
+    A redirect is refused rather than followed with the Bearer key attached, and
+    every failure raises ``RegistrationError``, so a caller reads one coarse
+    ``reason`` whichever way the call failed.
 
-    There is no retry loop. The only caller is ``check()``, which a person runs and
-    reads, and a person who wants a second attempt runs it again.
+    There is no retry loop here. ``check()`` is run and read by a person, who can run
+    it again. The workspace tag fetch retries on its own thread, then fails closed.
     """
     try:
         # Built inside the try: a malformed url raises ValueError from Request()
         # itself, not from the opener.
         request = urllib.request.Request(url, headers=headers, method="GET")
-        with _OPENER.open(request, timeout=timeout) as response:
+        with _opener().open(request, timeout=timeout) as response:
             return _parse(response.read(MAX_RESPONSE_BYTES + 1))
     except urllib.error.HTTPError as exc:
         raise RegistrationError(f"http_{exc.code}") from None

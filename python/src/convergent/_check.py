@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 
 from . import _core, _registry
 from ._core import Status, logger
+from ._receiver_routes import CHECK_PATH
+from ._user_agent import USER_AGENT
 
 _WIDTH = 80
 _LABEL = "  {:<12}"
@@ -214,12 +216,12 @@ def check() -> Report:
     if credentials is None:
         return Report(status)
 
-    url = f"{credentials.endpoint.rstrip('/')}/v1/check"
+    url = f"{credentials.endpoint.rstrip('/')}{CHECK_PATH}"
     if status.release:
         url += "?" + urllib.parse.urlencode({"release": status.release})
     started = time.monotonic()
     try:
-        body = _registry.get_json(url, headers=credentials.headers)
+        body = _registry.get_json(url, headers={**credentials.headers, "user-agent": USER_AGENT})
     except _registry.RegistrationError as exc:
         return Report(status, round_trip=exc.reason, endpoint=credentials.endpoint)
     except Exception as exc:

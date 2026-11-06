@@ -56,18 +56,50 @@ if (!order) {
   }
 } else {
   const require = createRequire(import.meta.url);
-  const { trace } = require("@opentelemetry/api");
+  const realNow = performance.now.bind(performance);
+  let idleMs = 0;
+  performance.now = () => realNow() + idleMs;
+  const { diag, DiagLogLevel, trace } = require("@opentelemetry/api");
   const first =
     order === "import-first" ? await import("convergent-sdk") : require("convergent-sdk");
   const second =
     order === "import-first" ? require("convergent-sdk") : await import("convergent-sdk");
+  const warnings = [];
+  const ignore = () => {};
+  diag.setLogger(
+    {
+      error: ignore,
+      warn: (message) => warnings.push(message),
+      info: ignore,
+      debug: ignore,
+      verbose: ignore,
+    },
+    DiagLogLevel.WARN,
+  );
+  const warned = (pattern) => warnings.filter((message) => pattern.test(message)).length;
+  const badName = /unusable name/u;
+  const badOperation = /unrecognized operation/u;
+  // A wrapper is usually built at import, before init(), and is checked then.
+  // A name counts characters, as Python's len() does: 128 emoji are 256 UTF-16 units.
+  first.agent({ name: "🙂".repeat(128) }, () => {});
+  first.observe({ name: "search", operation: "execute_tool" }, () => {});
+  assert.equal(warned(badName), 0);
+  first.agent({ name: "x".repeat(129) }, () => {});
+  assert.equal(warned(badName), 1);
   const bodies = [];
+  const exportUserAgents = new Set();
+  const exportSockets = [];
+  const retired = new WeakSet();
   const puts = [];
   const held = new Map();
   let putStatus = 201;
   // File uploads are off: HEAD answers 403 with the off reason in a header.
   let off = false;
   const server = createServer(async (request, response) => {
+    if (request.method === "POST" && request.url === "/v1/traces") {
+      exportSockets.push(request.socket);
+    }
+    if (retired.has(request.socket)) return;
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const raw = Buffer.concat(chunks);
@@ -91,6 +123,7 @@ if (!order) {
       response.writeHead(putStatus);
     } else {
       bodies.push(body);
+      exportUserAgents.add(request.headers["user-agent"]);
       response.writeHead(200, { "content-type": "application/x-protobuf" });
     }
     response.end();
@@ -120,7 +153,9 @@ if (!order) {
         return { traceId: root.traceId, parentSpanId: root.spanId, childSpanId: child.spanId };
       });
     });
-    assert.equal((await second.flush()).ok, true);
+    const drained = await second.flush();
+    assert.equal(drained.ok, true);
+    assert.equal(drained.dropped, 0);
     const exported = Buffer.concat(bodies);
     for (const value of [
       "invoke_agent package-root",
@@ -216,6 +251,8 @@ if (!order) {
     );
 
     assert.match(puts[0].headers["user-agent"], /^convergent-sdk-typescript\/\d/);
+    assert.equal(exportUserAgents.size, 1);
+    assert.match([...exportUserAgents][0], /^convergent-sdk-typescript\/\d/);
 
     // A bare 404, as a proxy or load balancer sends, drops only that file.
     putStatus = 404;
@@ -257,6 +294,63 @@ if (!order) {
       !exportedFiles.includes(Buffer.from(digest(unlisted))),
       "A span while uploads are paused lists no file",
     );
+
+    // Every span so far used a known operation, and each bad input warns once per process.
+    assert.equal(warned(badOperation), 0);
+    second.span({ name: " ", operation: "made_up" }, () => {});
+    second.span({ name: "", operation: "made_up" }, () => {});
+    assert.deepEqual([warned(badName), warned(badOperation)], [1, 1]);
+    // Empties the queue, so the burst below starts from zero.
+    assert.equal((await second.flush()).dropped, 0);
+
+    // OpenTelemetry's batch queue holds 2048 spans and sends 512 at a time. The 512th
+    // span starts a send, 2048 more fill the queue while that request is in flight,
+    // and this synchronous loop's remaining spans are dropped.
+    for (let index = 0; index < 3000; index += 1) {
+      second.span({ name: "burst", operation: "retrieval" }, () => {});
+    }
+    assert.equal((await second.flush()).dropped, 3000 - 512 - 2048);
+    assert.equal((await second.flush()).dropped, 0, "flush() counts drops since the last call");
+
+    second.span({ name: "before-gap", operation: "retrieval" }, () => {});
+    assert.equal(
+      (await second.flush()).ok,
+      true,
+      "a span exports successfully before the idle gap",
+    ); // Catches a broken baseline export path.
+    const beforeGapSocket = exportSockets.at(-1);
+    idleMs += 54_000;
+    second.span({ name: "active", operation: "retrieval" }, () => {});
+    assert.equal((await second.flush()).ok, true, "an export less than 55 seconds later succeeds"); // Catches premature refreshes that interrupt active keep-alive reuse.
+    assert.equal(
+      exportSockets.at(-1),
+      beforeGapSocket,
+      "exports under 55 seconds apart reuse their connection",
+    ); // Catches dropping keep-alive or closing every connection.
+
+    for (const socket of exportSockets) retired.add(socket);
+    const exportsBeforeGap = exportSockets.length;
+    idleMs += 61_000;
+    second.span({ name: "after-gap", operation: "retrieval" }, () => {});
+    assert.equal(
+      (await second.flush()).ok,
+      true,
+      "an export after a managed-ingest idle gap succeeds",
+    ); // Catches reuse of a socket retired by the load balancer.
+    assert.ok(
+      Buffer.concat(bodies).includes(Buffer.from("after-gap")),
+      "the post-gap span reaches the receiver",
+    ); // Catches silently dropped post-gap batches.
+    assert.equal(
+      retired.has(exportSockets.at(-1)),
+      false,
+      "the post-gap export uses a fresh connection",
+    ); // Catches sending the next batch on a retired connection.
+    assert.equal(
+      exportSockets.length,
+      exportsBeforeGap + 1,
+      "the post-gap batch arrives in one export request",
+    ); // Catches retries that add another request attempt.
     console.log(
       JSON.stringify({ ok: true, node: process.version, order, ...ids, uploads: puts.length }),
     );

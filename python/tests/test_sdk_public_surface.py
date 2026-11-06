@@ -40,11 +40,12 @@ EXPECTED = [
     "ArtifactOrigin",
     "Report",
     "Note",
+    "propagator",
 ]
 #: Public submodules. ``otel`` holds ConvergentSpanProcessor, which a caller adds
 #: to a tracer provider they own. It stays out of ``__all__``, which lists calls
 #: and types rather than modules.
-EXPECTED_SUBMODULES = ["otel"]
+EXPECTED_SUBMODULES = ["otel", "carrier", "temporal"]
 #: ``install`` adds the processor to a provider and hands that provider over.
 #: ``ConvergentSpanProcessor`` is the same thing for a caller placing it by hand.
 EXPECTED_OTEL = ["ConvergentSpanProcessor", "install"]
@@ -58,6 +59,8 @@ REMOVED = (
     "get_current_span",
     "instrument",
     "span_processor",
+    # Sending the session is inject(..., session=True), not a context manager.
+    "sending_session",
 )
 
 

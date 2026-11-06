@@ -13,7 +13,13 @@ import { context, ROOT_CONTEXT, type Span } from "@opentelemetry/api";
 import { suppressTracing } from "@opentelemetry/core";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { reportOnce } from "./diagnostics.js";
-import { version } from "./version.js";
+import { ARTIFACT_PATH, REASON_HEADER, UPLOADS_OFF_REASON } from "./receiver-routes.js";
+import {
+  CONVERGENT_ARTIFACTS_DROPPED,
+  CONVERGENT_ARTIFACTS_INPUT,
+  CONVERGENT_ARTIFACTS_OUTPUT,
+} from "./telemetry-keys.js";
+import { userAgent } from "./version.js";
 
 export type ArtifactOrigin = "user" | "agent" | "model" | "tool" | "external";
 
@@ -47,22 +53,19 @@ interface Answer {
 }
 
 const listKeys: Record<Role, string> = {
-  input: "convergent.artifacts.input",
-  output: "convergent.artifacts.output",
+  input: CONVERGENT_ARTIFACTS_INPUT,
+  output: CONVERGENT_ARTIFACTS_OUTPUT,
 };
-const droppedKey = "convergent.artifacts.dropped";
-// The route says uploads are off for the organization with this error reason, and
+// The route says uploads are off for the organization with UPLOADS_OFF_REASON, and
 // only with it, so a 403 or 404 from a proxy or load balancer cannot turn uploads
 // off. Uploads and file lists pause for pauseMs, then the next file asks again.
-const uploadsOffReason = "artifact_uploads_disabled";
-// Carries the reason on answers that have no body, such as a HEAD.
-const reasonHeader = "x-convergent-reason";
+// Node lower-cases the names of the headers it receives.
+const receivedReasonHeader = REASON_HEADER.toLowerCase();
 const pauseMs = 10 * 60_000;
 // A bad key ends uploads and file lists for the rest of the process.
 const stopStatus = new Set([401]);
 const refusedStatus = new Set([413, 422]);
 const errorBodyBytes = 4096;
-const userAgent = `convergent-sdk-typescript/${version}`;
 const retryableStatus = new Set([429, 500, 502, 503, 504]);
 const MiB = 1024 * 1024;
 // Files are packed into one attribute per role, so a span's count is capped.
@@ -122,11 +125,11 @@ export class Artifacts {
         capture !== undefined && this.heldBytes + capture.sizeBytes > heldBytesLimit;
       if (!capture || overBudget) {
         held.dropped += 1;
-        span.setAttribute(droppedKey, held.dropped);
+        span.setAttribute(CONVERGENT_ARTIFACTS_DROPPED, held.dropped);
         if (budgetFull || overBudget) {
           reportOnce(
             "artifact_held_full",
-            `Convergent did not record a file because files held for spans that have not ended passed ${heldBytesLimit / MiB} MiB. The span counts it in ${droppedKey}.`,
+            `Convergent did not record a file because files held for spans that have not ended passed ${heldBytesLimit / MiB} MiB. The span counts it in ${CONVERGENT_ARTIFACTS_DROPPED}.`,
           );
         }
         return;
@@ -216,7 +219,9 @@ export class Artifacts {
   }
 
   private async deliver(capture: Capture): Promise<Step> {
-    const url = new URL(`${this.options.endpoint}/v1/artifacts/${capture.digest}`);
+    const url = new URL(
+      `${this.options.endpoint}${ARTIFACT_PATH.replace("{digest}", capture.digest)}`,
+    );
     const authorization = `Bearer ${this.options.apiKey}`;
     // Only a 200 carrying the file's size counts, so a proxy that answers 200
     // to everything cannot make uploads stop.
@@ -228,7 +233,7 @@ export class Artifacts {
       return "stored";
     }
     // The off answer comes before any bytes are sent.
-    if (held?.headers[reasonHeader] === uploadsOffReason) return "pause";
+    if (held?.headers[receivedReasonHeader] === UPLOADS_OFF_REASON) return "pause";
     const isCompressed = compressedSignature.test(capture.body.subarray(0, 12).toString("latin1"));
     // The receiver sizes its memory hold from the size the frame declares.
     const body = isCompressed
@@ -246,7 +251,7 @@ export class Artifacts {
     let step: Step = "retry";
     for (let attempt = 0; attempt < attempts; attempt++) {
       const answer = await send(url, "PUT", headers, body).catch(() => undefined);
-      const reason = answer?.headers[reasonHeader];
+      const reason = answer?.headers[receivedReasonHeader];
       step = answer
         ? stepFor(answer.status, typeof reason === "string" ? reason : errorReason(answer.body))
         : "retry";
@@ -337,7 +342,7 @@ function captureOf(
   if (mediaType && !(/^[\x20-\x7e]+$/u.test(mediaType) && mediaType.length <= mediaTypeChars)) {
     reportOnce(
       "artifact_media_type",
-      `Convergent did not record a file whose mediaType is not printable ASCII of at most ${mediaTypeChars} characters, such as 'text/csv'. The span counts it in ${droppedKey}.`,
+      `Convergent did not record a file whose mediaType is not printable ASCII of at most ${mediaTypeChars} characters, such as 'text/csv'. The span counts it in ${CONVERGENT_ARTIFACTS_DROPPED}.`,
     );
     return undefined;
   }
@@ -354,7 +359,7 @@ function captureOf(
   } else if (typeof source === "string" && /^https?:\/\//u.test(source)) {
     reportOnce(
       "artifact_url",
-      `Convergent did not record a file given as a URL. Pre-signed URLs are not supported yet; pass a local path or bytes. The span counts it in ${droppedKey}.`,
+      `Convergent did not record a file given as a URL. Pre-signed URLs are not supported yet; pass a local path or bytes. The span counts it in ${CONVERGENT_ARTIFACTS_DROPPED}.`,
     );
     return undefined;
   } else if (typeof source === "string") {
@@ -364,21 +369,21 @@ function captureOf(
     } catch {
       reportOnce(
         "artifact_unreadable",
-        `Convergent could not read a file passed to inputArtifact() or outputArtifact(). The span counts it in ${droppedKey}.`,
+        `Convergent could not read a file passed to inputArtifact() or outputArtifact(). The span counts it in ${CONVERGENT_ARTIFACTS_DROPPED}.`,
       );
       return undefined;
     }
   } else {
     reportOnce(
       "artifact_source_type",
-      `Convergent could not record a file that is not a local path or a Uint8Array. The span counts it in ${droppedKey}.`,
+      `Convergent could not record a file that is not a local path or a Uint8Array. The span counts it in ${CONVERGENT_ARTIFACTS_DROPPED}.`,
     );
     return undefined;
   }
   if (!body) {
     reportOnce(
       "artifact_too_large",
-      `Convergent did not record a file larger than ${fileBytes / MiB} MiB. The span counts it in ${droppedKey}.`,
+      `Convergent did not record a file larger than ${fileBytes / MiB} MiB. The span counts it in ${CONVERGENT_ARTIFACTS_DROPPED}.`,
     );
     return undefined;
   }
@@ -443,7 +448,7 @@ function errorReason(body: string): string | undefined {
 
 function stepFor(status: number, reason?: string): Step {
   if (status >= 200 && status < 300) return "stored";
-  if (reason === uploadsOffReason) return "pause";
+  if (reason === UPLOADS_OFF_REASON) return "pause";
   if (stopStatus.has(status)) return "stop";
   if (refusedStatus.has(status)) return "refused";
   return retryableStatus.has(status) ? "retry" : "fail";

@@ -1,10 +1,14 @@
 import {
+  createNoopMeter,
   isSpanContextValid,
   ProxyTracerProvider,
   ROOT_CONTEXT,
   trace,
   type Attributes,
   type Context,
+  type Counter,
+  type Meter,
+  type MeterProvider,
   type TracerProvider,
 } from "@opentelemetry/api";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
@@ -12,6 +16,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { CompressionAlgorithm, OTLPExporterError } from "@opentelemetry/otlp-exporter-base";
 import {
   BatchSpanProcessor,
+  type BufferConfig,
   type ReadableSpan,
   type Span,
   type SpanExporter,
@@ -28,10 +33,13 @@ import {
   type ResolvedOptions,
 } from "./configuration.js";
 import { destinationName, File } from "./destinations.js";
+import { TRACES_PATH } from "./receiver-routes.js";
+import { sdkVersion, userAgent } from "./version.js";
 import { reportOnce } from "./diagnostics.js";
 import { setupFailure } from "./failures.js";
 import { drainBeforeExit } from "./lifecycle.js";
 import { createLocalExporter } from "./local-export.js";
+import { createExportAgent } from "./export-agent.js";
 import {
   agentDecision,
   applyUpdate,
@@ -45,25 +53,29 @@ import {
   type SpanMetadata,
 } from "./filters.js";
 import { sessionContextKey } from "./session.js";
+import {
+  CONVERGENT_SDK_VERSION,
+  CONVERGENT_SESSION_ID,
+  GEN_AI_AGENT_VERSION,
+  GEN_AI_OPERATION_NAME,
+  OPERATIONS,
+} from "./telemetry-keys.js";
 
 function exportCopy(span: ReadableSpan, release: string, metadata?: SpanMetadata): ReadableSpan {
   const spanContext = span.spanContext();
   const attributes: Attributes = {
     ...span.attributes,
     ...exportMarks(spanMarks(span.attributes, metadata)),
+    // Only the copy carries this key, so the caller's own exporters never see it.
+    [CONVERGENT_SDK_VERSION]: sdkVersion,
   };
   const operation = metadata?.operation;
   const sessionId = metadata?.sessionId;
-  // Only a span that declares a GenAI operation at start is agent work.
-  if (operation) {
-    attributes["convergent.semantic.version"] = "1";
-    attributes["convergent.execution.id"] = spanContext.traceId;
+  if (sessionId !== undefined && typeof attributes[CONVERGENT_SESSION_ID] !== "string") {
+    attributes[CONVERGENT_SESSION_ID] = sessionId;
   }
-  if (sessionId !== undefined && typeof attributes["convergent.session.id"] !== "string") {
-    attributes["convergent.session.id"] = sessionId;
-  }
-  if (operation === "invoke_agent" && attributes["gen_ai.agent.version"] === undefined) {
-    attributes["gen_ai.agent.version"] = release;
+  if (operation === OPERATIONS.agent_run && attributes[GEN_AI_AGENT_VERSION] === undefined) {
+    attributes[GEN_AI_AGENT_VERSION] = release;
   }
   return {
     name: span.name,
@@ -98,11 +110,23 @@ function networkExporter({ apiKey, endpoint }: Credentials): SpanExporter {
       `${configured.join(" and ")} ${configured.length > 1 ? "are" : "is"} set. OpenTelemetry adds the headers in OTEL_EXPORTER_OTLP_HEADERS and OTEL_EXPORTER_OTLP_TRACES_HEADERS to every Convergent export request as well, so headers meant for another collector or proxy also reach Convergent. The Convergent API key still takes precedence over an authorization entry. Their values are not shown.`,
     );
   }
-  return new OTLPTraceExporter({
-    url: `${endpoint}/v1/traces`,
+  const agent = createExportAgent();
+  const exporter = new OTLPTraceExporter({
+    url: `${endpoint}${TRACES_PATH}`,
     headers: { Authorization: `Bearer ${apiKey}` },
+    // Put ahead of OpenTelemetry's own product in the User-Agent.
+    userAgent,
     compression: CompressionAlgorithm.GZIP,
+    httpAgentOptions: agent.factory,
   });
+  return {
+    export(spans, callback) {
+      agent.refreshIdle();
+      exporter.export(spans, callback);
+    },
+    shutdown: () => exporter.shutdown(),
+    forceFlush: () => exporter.forceFlush(),
+  };
 }
 
 /**
@@ -191,6 +215,28 @@ class ConvergentExporter implements SpanExporter {
   }
 }
 
+/**
+ * A batch processor that reports each span it drops from a full queue. OpenTelemetry tells
+ * only its self-observability meter: one counter for every processed span, where `error.type`
+ * `queue_full` marks a drop. The option is missing from sdk-trace-base's config type, though
+ * its constructor passes it on.
+ */
+function countingBatch(
+  exporter: SpanExporter,
+  onDrop: (count: number) => void,
+): BatchSpanProcessor {
+  const counter: Counter = {
+    add(value, attributes) {
+      if (attributes?.["error.type"] === "queue_full") onDrop(value);
+    },
+  };
+  const meter: Meter = Object.assign(Object.create(createNoopMeter()) as Meter, {
+    createCounter: () => counter,
+  });
+  const selfObsMeterProvider: MeterProvider = { getMeter: () => meter };
+  return new BatchSpanProcessor(exporter, { selfObsMeterProvider } as BufferConfig);
+}
+
 interface DestinationPipeline {
   exporter: ConvergentExporter;
   batch: BatchSpanProcessor;
@@ -220,6 +266,7 @@ export class ConvergentProcessor implements SpanProcessor {
   // Keyed by the span object, so an entry lives as long as its span is reachable.
   private readonly metadata = new WeakMap<object, SpanMetadata>();
   private probed: { delegate: TracerProvider; carried: boolean } | undefined;
+  private dropped = 0;
   readonly destinations: string[] = [];
   // What check() asks the server about.
   readonly credentials: Credentials | undefined;
@@ -270,7 +317,10 @@ export class ConvergentProcessor implements SpanProcessor {
       this.metadata,
     );
     try {
-      this.pipelines.push({ exporter, batch: new BatchSpanProcessor(exporter) });
+      const batch = countingBatch(exporter, (count) => {
+        this.dropped += count;
+      });
+      this.pipelines.push({ exporter, batch });
     } catch (error) {
       disposeUnused(exporter);
       throw error;
@@ -283,7 +333,7 @@ export class ConvergentProcessor implements SpanProcessor {
     const metadata: SpanMetadata = { pairs: {}, unresolved: false, keep: !this.filters.agents };
     this.metadata.set(span, metadata);
     try {
-      const operation = span.attributes["gen_ai.operation.name"];
+      const operation = span.attributes[GEN_AI_OPERATION_NAME];
       if (typeof operation === "string" && operation) metadata.operation = operation;
       const sessionId = parentContext.getValue(sessionContextKey);
       if (typeof sessionId === "string") metadata.sessionId = sessionId;
@@ -380,6 +430,13 @@ export class ConvergentProcessor implements SpanProcessor {
         }
       }),
     );
+  }
+
+  /** Spans dropped from a full queue since the last call, summed over every destination. */
+  takeDropped(): number {
+    const dropped = this.dropped;
+    this.dropped = 0;
+    return dropped;
   }
 
   async shutdown(): Promise<void> {

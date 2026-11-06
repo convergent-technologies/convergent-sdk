@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Telemetry scenarios",
+  "description": "The shape of scenarios.json beside this file. Every option key is named here, so an unknown or camelCase key fails. Label names, payloads, and span names are free form.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["description", "nodes", "scenarios"],
+  "properties": {
+    "description": { "type": "string" },
+    "nodes": { "type": "object", "additionalProperties": { "type": "string" } },
+    "scenarios": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/scenario" } }
+  },
+  "$defs": {
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "case", "run", "expect"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "case": { "enum": ["success", "error", "cancel"] },
+        "init": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "agents": { "type": "array", "items": { "type": "string" } } }
+        },
+        "run": { "$ref": "#/$defs/nodes" },
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sent"],
+          "properties": {
+            "sent": { "type": "object", "additionalProperties": { "$ref": "#/$defs/sent_span" } }
+          }
+        }
+      }
+    },
+    "sent_span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "attributes"],
+      "properties": {
+        "status": { "enum": ["UNSET", "OK", "ERROR"] },
+        "attributes": { "type": "object" }
+      }
+    },
+    "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+    "node": {
+      "oneOf": [
+        { "$ref": "#/$defs/agent" },
+        { "$ref": "#/$defs/span" },
+        { "$ref": "#/$defs/session" },
+        { "$ref": "#/$defs/raw" }
+      ]
+    },
+    "span_options": {
+      "properties": {
+        "model": { "type": "string" },
+        "system_instructions": { "type": "string" },
+        "tools": { "type": "array" },
+        "attributes": { "type": "object" },
+        "context_attributes": { "type": "object" },
+        "input": true,
+        "output": true,
+        "outputs": { "type": "array" },
+        "tool_call_id": { "type": "string" },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } },
+        "raises": { "enum": ["error", "cancel"] },
+        "children": { "$ref": "#/$defs/nodes" }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "required": ["agent"],
+      "properties": { "agent": { "type": "string" } },
+      "allOf": [{ "$ref": "#/$defs/span_options" }],
+      "unevaluatedProperties": false
+    },
+    "span": {
+      "type": "object",
+      "required": ["span"],
+      "properties": { "span": { "type": "string" }, "operation": { "type": "string" } },
+      "allOf": [{ "$ref": "#/$defs/span_options" }],
+      "unevaluatedProperties": false
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session"],
+      "properties": { "session": { "type": "string" }, "children": { "$ref": "#/$defs/nodes" } }
+    },
+    "raw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw", "scope"],
+      "properties": {
+        "raw": { "type": "string" },
+        "scope": { "type": "string" },
+        "attributes": { "type": "object" },
+        "late_attributes": { "type": "object" },
+        "children": { "$ref": "#/$defs/nodes" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "text"],
+      "properties": {
+        "role": { "enum": ["input", "output"] },
+        "text": { "type": "string" },
+        "filename": { "type": "string" },
+        "media_type": { "type": "string" },
+        "origin": { "type": "string" }
+      }
+    }
+  }
+}

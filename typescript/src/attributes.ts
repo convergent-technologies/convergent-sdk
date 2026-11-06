@@ -1,27 +1,30 @@
 import type { Attributes, AttributeValue } from "@opentelemetry/api";
 import { reportOnce } from "./diagnostics.js";
+import {
+  GEN_AI_AGENT_NAME,
+  GEN_AI_AGENT_VERSION,
+  GEN_AI_INPUT_MESSAGES,
+  GEN_AI_OPERATION_NAME,
+  GEN_AI_OUTPUT_MESSAGES,
+  GEN_AI_TOOL_CALL_ARGUMENTS,
+  GEN_AI_TOOL_CALL_RESULT,
+  GEN_AI_TOOL_NAME,
+  OPERATIONS,
+} from "./telemetry-keys.js";
 
-export const operations = new Map([
-  ["agent_run", "invoke_agent"],
-  ["model_call", "chat"],
-  ["tool_call", "execute_tool"],
-  ["retrieval", "retrieval"],
-  ["embeddings", "embeddings"],
-  ["workflow", "invoke_workflow"],
-  ["agent_create", "create_agent"],
-  ["text_completion", "text_completion"],
-  ["generate_content", "generate_content"],
-]);
+// Kept a Map: indexing OPERATIONS directly would find a built-in property such as
+// "constructor" on the object's prototype.
+export const operations: ReadonlyMap<string, string> = new Map(Object.entries(OPERATIONS));
 
 export const reservedAttributeKeys: ReadonlySet<string> = new Set([
-  "gen_ai.operation.name",
-  "gen_ai.agent.name",
-  "gen_ai.agent.version",
-  "gen_ai.tool.name",
-  "gen_ai.input.messages",
-  "gen_ai.output.messages",
-  "gen_ai.tool.call.arguments",
-  "gen_ai.tool.call.result",
+  GEN_AI_OPERATION_NAME,
+  GEN_AI_AGENT_NAME,
+  GEN_AI_AGENT_VERSION,
+  GEN_AI_TOOL_NAME,
+  GEN_AI_INPUT_MESSAGES,
+  GEN_AI_OUTPUT_MESSAGES,
+  GEN_AI_TOOL_CALL_ARGUMENTS,
+  GEN_AI_TOOL_CALL_RESULT,
 ]);
 
 export function acceptedAttribute(key: string, value: unknown): value is AttributeValue {
@@ -51,29 +54,47 @@ export function customAttributes(attributes: Attributes | undefined): Attributes
   );
 }
 
-export function json(value: unknown): string {
+// JSON's own values, which both SDKs encode alike: null, booleans, finite numbers,
+// strings, arrays, and plain objects of these. An undefined property is left out, as
+// JSON.stringify leaves it out. A class instance, a Date, a Map, NaN, a cycle, or a
+// hole is not, since JSON.stringify would change it, and Python has no form for it.
+function portable(value: unknown, path: Set<object>): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || path.has(value)) return false;
+  path.add(value);
   try {
-    const encoded = JSON.stringify(value);
-    if (encoded !== undefined) return encoded;
-  } catch {
-    reportOnce(
-      "content_json",
-      "Convergent could not encode content as JSON; using its text value.",
-    );
-  }
-  try {
-    return String(value);
-  } catch {
-    reportOnce("content_text", "Convergent could not convert content to text.");
-    return "<unrepresentable>";
+    if (Array.isArray(value)) {
+      for (const item of value) if (!portable(item, path)) return false;
+      return true;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    return Object.values(value).every((item) => item === undefined || portable(item, path));
+  } finally {
+    path.delete(value);
   }
 }
 
-export function text(value: unknown): string {
+// Compact JSON, or undefined, logged once, for a value that is not portable JSON.
+export function json(value: unknown): string | undefined {
+  try {
+    if (portable(value, new Set())) return JSON.stringify(value);
+  } catch {
+    // A getter or proxy that throws is the caller's code; nothing here may raise.
+  }
+  reportOnce(
+    "content_not_json",
+    "Convergent dropped span content that is not portable JSON. Pass plain objects, arrays, strings, finite numbers, booleans, and null.",
+  );
+  return undefined;
+}
+
+export function text(value: unknown): string | undefined {
   return typeof value === "string" ? value : json(value);
 }
 
-export function messages(role: "user" | "assistant", value: unknown): string {
+export function messages(role: "user" | "assistant", value: unknown): string | undefined {
   if (
     Array.isArray(value) &&
     value.length > 0 &&
@@ -81,5 +102,6 @@ export function messages(role: "user" | "assistant", value: unknown): string {
   ) {
     return json(value);
   }
-  return json([{ role, parts: [{ type: "text", content: text(value) }] }]);
+  const content = text(value);
+  return content === undefined ? undefined : json([{ role, parts: [{ type: "text", content }] }]);
 }

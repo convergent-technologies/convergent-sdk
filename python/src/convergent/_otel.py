@@ -10,23 +10,16 @@ in the same order.
 from __future__ import annotations
 
 import logging
-import os
-import threading
-import weakref
 from collections.abc import Mapping
 
 from opentelemetry import trace
-from opentelemetry.context import Context, attach, detach
+from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor, TracerProvider
 
-from . import _artifacts, _config, _core, _processors, _transport
+from . import _artifacts, _config, _core, _processors, _tag_fetch, _transport
 from ._semantic import SemanticSpanProcessor
 
 logger = logging.getLogger("convergent.sdk")
-
-#: Every live processor, so a fork can repair the state its child inherited. Weak
-#: so a processor a test threw away does not stay alive here.
-_instances: weakref.WeakSet[ConvergentSpanProcessor] = weakref.WeakSet()
 
 
 def install(
@@ -112,11 +105,8 @@ class ConvergentSpanProcessor(SpanProcessor):
     ``tracer_provider`` have none. The endpoint then falls back to the managed
     ingest endpoint when an API key is present.
 
-    Construction makes no network call, and no span ever waits for one. The first
-    span starts the deployment registration on a thread of its own. Until it
-    lands, spans carry your ``release`` as ``convergent.deployment.fingerprint``,
-    which the server resolves against the same key registration upserts on. After
-    it lands, spans carry ``convergent.deployment.id``.
+    Construction makes one network call, ``GET /v1/check`` for the workspace
+    tag, on a thread of its own; neither construction nor any span waits for it.
 
     ``tracer_provider`` is the provider you are adding this to, and it is what
     ``span()`` and ``observe()`` record through. Leave it out and they use the
@@ -131,9 +121,8 @@ class ConvergentSpanProcessor(SpanProcessor):
     described is not the one running.
 
     Construction is startup, so bad arguments raise here, on your own thread,
-    before anything is built. Everything after it degrades instead: a failed
-    registration and an exporter that will not start are each logged once, and your
-    application keeps running.
+    before anything is built. Everything after it degrades instead: an exporter
+    that will not start is logged once, and your application keeps running.
 
     Raises:
         Only when ``strict`` is on, from the argument or ``CONVERGENT_STRICT``.
@@ -143,7 +132,7 @@ class ConvergentSpanProcessor(SpanProcessor):
             values, or ``tracer_provider`` is not an
             ``opentelemetry.sdk.trace.TracerProvider``.
         ValueError: no api key or no release is configured, an agent name is
-            empty or oversized, there are more names than registration accepts,
+            empty or oversized, there are more names than the SDK accepts,
             the ``require_span_attributes`` or ``reject_span_attributes``
             mapping or an attribute name in it is empty, a
             ``require_span_attributes`` or ``reject_span_attributes`` value is
@@ -165,10 +154,6 @@ class ConvergentSpanProcessor(SpanProcessor):
         tracer_provider: TracerProvider | None = None,
         strict: bool = False,
     ) -> None:
-        self._gate = threading.Lock()
-        self._registration_started = False
-        self._registered = False
-        self._registration: threading.Thread | None = None
         #: The stamping processor, and the flag for whether this one is armed. It
         #: stays ``None`` for a processor with no credentials and for one that lost
         #: the claim on this process.
@@ -180,7 +165,6 @@ class ConvergentSpanProcessor(SpanProcessor):
         # Rebound before anything else, so this frame's locals stay masked
         # whatever path the call takes out of here.
         api_key = _config._masked_key(api_key)
-        _instances.add(self)
         running = _core._running_config()
         if running is not None:
             asked = _asked_for(
@@ -220,7 +204,6 @@ class ConvergentSpanProcessor(SpanProcessor):
             semantic = self._semantic
             if semantic is None:
                 return
-            self._start_registration()
             semantic.on_start(span, parent_context)
             _processors._STAMPER.on_start(span, parent_context)
             for destination in self._destinations:
@@ -236,7 +219,6 @@ class ConvergentSpanProcessor(SpanProcessor):
             _core._warn_once("otel_on_end", "Convergent could not record a span that ended")
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
-        self._start_registration()
         try:
             # Materialized first: all() would stop flushing after the first False.
             flushed = [
@@ -272,10 +254,7 @@ class ConvergentSpanProcessor(SpanProcessor):
             return
 
         self._exporter = exporter
-        deployment = _fingerprint(config.release)
-        running = _core._adopt(
-            config, deployment, [exporter], self._find_provider, self._start_registration
-        )
+        running = _core._adopt(config, [exporter], self._find_provider)
         if running is not None:
             self._drop(config, running, exporter)
             return
@@ -286,7 +265,8 @@ class ConvergentSpanProcessor(SpanProcessor):
             config.policy, config.agents, (exporter, _artifacts.start(api_key, endpoint))
         )
         self._config = config
-        self._semantic = SemanticSpanProcessor(config.release, deployment)
+        self._semantic = SemanticSpanProcessor(config.release)
+        _tag_fetch.fetch_workspace_tag(endpoint, api_key)
 
     def _unadopt(self) -> None:
         """Release the claim if this processor is the one that made it."""
@@ -337,76 +317,6 @@ class ConvergentSpanProcessor(SpanProcessor):
         """
         current = trace.get_tracer_provider()
         return current if isinstance(current, TracerProvider) and _carries(current, self) else None
-
-    def _start_registration(self) -> None:
-        """Start the deployment registration once, on a thread of its own.
-
-        No lock is held across the request and no span waits for it, which is the
-        rule ``init()`` follows for the same call. The gate here is held for a flag
-        flip, so exactly one thread starts exactly one registration.
-        """
-        if self._registration_started:
-            return
-        with self._gate:
-            if self._registration_started:
-                return
-            self._registration_started = True
-        try:
-            self._registration = threading.Thread(
-                target=self._register, name="convergent-register", daemon=True
-            )
-            self._registration.start()
-        except Exception:
-            _core._warn_once(
-                "registration_thread",
-                "Convergent could not start its deployment registration; traces carry the "
-                "release fingerprint for the server to resolve",
-            )
-
-    def _register(self) -> None:
-        """Register the deployment, then stamp its id on every span from here on.
-
-        The request runs with OpenTelemetry instrumentation suppressed, so a caller
-        who traces their HTTP client records no span for it. That keeps our request
-        out of their trace, keeps this processor from being handed its own request,
-        and keeps the ``Authorization`` header out of anything that captures
-        request headers.
-
-        One attempt, whose own retries and backoff belong to
-        ``_registry.post_json``. A failure keeps the fingerprint that spans already
-        carry and is never tried again, so a control plane that is down costs one
-        request rather than one per span.
-        """
-        config = self._config
-        if config is None:
-            return
-        token = attach(_transport.suppressed())
-        try:
-            deployment, linked = _core._register_deployment(
-                api_key=config.api_key,
-                endpoint=config.endpoint,
-                release=config.release,
-                agents=config.agents,
-            )
-        finally:
-            detach(token)
-        if "convergent.deployment.id" not in deployment:
-            return
-        # One assignment, so a span reading this gets one identity or the other
-        # whole rather than a half-written mapping.
-        self._semantic = SemanticSpanProcessor(config.release, deployment)
-        self._registered = True
-        _core._link_deployment(deployment, linked)
-
-
-def _fingerprint(release: str) -> dict[str, str]:
-    """The deployment identity that needs no network call.
-
-    The server resolves it against the ``(organization_id, fingerprint)`` key
-    registration upserts on, so a span stamped with it reaches the same deployment
-    a registered span reaches.
-    """
-    return {"convergent.deployment.fingerprint": release}
 
 
 def _carries(provider: TracerProvider, processor: SpanProcessor) -> bool:
@@ -474,26 +384,6 @@ def _dropped_message(config: _config._Config | None, running: _config._Config) -
         f"added sends nothing and has shut its exporter down.{named} Configure tracing "
         "once, with init() or with one processor."
     )
-
-
-def _reset_after_fork() -> None:
-    """Repair every processor's state in a forked child.
-
-    fork() copies memory but only the calling thread, so a gate held at fork time
-    arrives locked in the child with nobody left to release it, and a registration
-    still in flight has no thread running it in the child. The child gets a fresh
-    gate, and it gets to start its own registration when the parent's had not
-    landed. ``_core`` and ``_egress`` do the same for their own locks.
-    """
-    for instance in _instances:
-        instance._gate = threading.Lock()
-        if not instance._registered:
-            instance._registration_started = False
-            instance._registration = None
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_after_fork)
 
 
 __all__ = ["ConvergentSpanProcessor", "install"]

@@ -104,8 +104,8 @@ change your content. Whatever you pass to `setInput()`, `setOutput()`, and
 `setAttribute()` is sent as you gave it.
 
 The SDK does not record an error's message or stack. When a traced function
-throws, the span records only the error's class name. A thrown string records
-nothing.
+throws, the span records only an `Error`'s `name`. A thrown string records no
+name or message, though it still marks the span as an error.
 
 The SDK has no redaction option. To choose which spans leave your process, use
 the [span filters](../../docs/span-filters.md). To change or redact the content

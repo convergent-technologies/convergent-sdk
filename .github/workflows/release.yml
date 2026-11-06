@@ -2,11 +2,13 @@
 #
 # Pushing a tag like python-v0.0.12 runs ci-python.yml and the release preflight
 # (.github/scripts/release-preflight.sh: the tag names the version in
-# python/pyproject.toml, is on main, and python/CHANGELOG.md has its section),
-# builds once, checks and publishes those exact files through trusted
-# publishing (OIDC, environment "pypi"), and creates a GitHub Release whose
-# notes are that changelog section. workflow_dispatch stays as a fallback that builds and
-# publishes without a tag; it skips the preflight and the GitHub Release.
+# python/pyproject.toml, is on main, python/CHANGELOG.md has its section, and
+# the generated _telemetry_keys.py records REGISTRY_SHA256), builds once,
+# checks and publishes those exact files through trusted publishing (OIDC,
+# environment "pypi"), and creates a GitHub Release whose notes are that
+# changelog section plus the telemetry registry's sha256. workflow_dispatch
+# also builds from branches, but the pypi environment permits publishing only
+# from python-v* tags.
 #
 # The publish step uses pypa/gh-action-pypi-publish because it generates PEP
 # 740 attestations; `uv publish` uploads attestations but does not create them.

@@ -1,12 +1,12 @@
 {
-  "description": "Reference cases for span filters that the Python and TypeScript SDKs handle the same way. Keys use the TypeScript option names. A proof runner loads each scenario in a fresh process: init() with `init` and `env`, then the `run` tree, then flush(). `expect.sent` names every span Convergent should receive and the convergent.attributes.* marks it should carry. A span not listed must not be sent. No CI job runs these cases yet. A scenario with `destination: file` runs without an API key and writes to a File destination, which the runner reads instead of the network capture.",
+  "description": "Reference cases for span filters that the Python and TypeScript SDKs handle the same way. Keys are snake_case and name no language's API; each SDK's test driver maps them to its own. A proof runner loads each scenario in a fresh process: it starts the SDK with the `init` options and the `env` variables, runs the `run` tree, then sends everything. `expect.sent` names every span Convergent should receive and the convergent.attributes.* marks it should carry. A span not listed must not be sent. tests/integration/test_sdk_scenarios.py runs each case against both SDKs in CI. A scenario with `destination: file` runs without an API key and writes to a File destination, which the runner reads instead of the network capture.",
   "nodes": {
     "agent": "agent_run span named by the value. Span name is `invoke_agent <name>`.",
     "span": "SDK span with `operation` (default retrieval) named by the value.",
-    "wrapped": "observe() wrapper called with `args`. `resolver` maps a contextAttributes key to an argument index, or is \"throw\" or \"async\" (an async resolver returning customer.id = acme).",
-    "raw": "Plain OpenTelemetry span from the tracer named `scope`, started in the active context with `attributes`. `lateAttributes` are set after it starts.",
+    "wrapped": "A function wrapped by the SDK's observe helper, called with `args`. `resolver` maps a context attribute key to an argument index, or is \"throw\" or \"async\" (an async resolver returning customer.id = acme).",
+    "raw": "Plain OpenTelemetry span from the tracer named `scope`, started in the active context with `attributes`. `late_attributes` are set after it starts.",
     "remote": "Runs `children` under a remote parent with this trace id and span id.",
-    "setContextAttributes": "Calls setContextAttributes with this object on the enclosing SDK span.",
+    "set_context_attributes": "Adds these context attributes to the enclosing SDK span.",
     "concurrent": "Runs these nodes at the same time.",
     "sleep": "Waits this many milliseconds."
   },
@@ -61,20 +61,20 @@
     {
       "name": "attribute_sources",
       "init": {
-        "requireSpanAttributes": { "customer.tier": "paid", "deploy.region": ["us", "eu"] },
-        "rejectSpanAttributes": { "customer.id": ["blocked"], "retry.count": [1] }
+        "require_span_attributes": { "customer.tier": "paid", "deploy.region": ["us", "eu"] },
+        "reject_span_attributes": { "customer.id": ["blocked"], "retry.count": [1] }
       },
       "env": { "OTEL_RESOURCE_ATTRIBUTES": "deploy.region=us" },
       "run": [
         {
           "span": "stamped.paid.wins",
           "attributes": { "customer.tier": "free" },
-          "contextAttributes": { "customer.tier": "paid" }
+          "context_attributes": { "customer.tier": "paid" }
         },
         {
           "span": "stamped.free.wins",
           "attributes": { "customer.tier": "paid" },
-          "contextAttributes": { "customer.tier": "free" }
+          "context_attributes": { "customer.tier": "free" }
         },
         { "span": "bare.paid", "attributes": { "customer.tier": "paid" } },
         { "span": "missing.tier" },
@@ -85,11 +85,11 @@
         {
           "span": "rejected.by.mark",
           "attributes": { "customer.tier": "paid" },
-          "contextAttributes": { "customer.id": "blocked" }
+          "context_attributes": { "customer.id": "blocked" }
         },
         {
           "span": "parent.marked",
-          "contextAttributes": { "customer.tier": "paid" },
+          "context_attributes": { "customer.tier": "paid" },
           "children": [{ "raw": "library.child", "scope": "app.lib" }]
         },
         { "span": "bool.not.number", "attributes": { "customer.tier": "paid", "retry.count": true } },
@@ -101,7 +101,7 @@
         },
         {
           "span": "stamp.beats.start",
-          "contextAttributes": { "customer.tier": "free" },
+          "context_attributes": { "customer.tier": "free" },
           "children": [
             {
               "raw": "start.mark.loses",
@@ -111,7 +111,7 @@
             {
               "raw": "late.mark.wins",
               "scope": "app.lib",
-              "lateAttributes": { "convergent.attributes.customer.tier": "paid" }
+              "late_attributes": { "convergent.attributes.customer.tier": "paid" }
             }
           ]
         }
@@ -131,21 +131,21 @@
     {
       "name": "reject_wins_over_require",
       "init": {
-        "requireSpanAttributes": { "customer.tier": "paid" },
-        "rejectSpanAttributes": { "customer.tier": "paid" }
+        "require_span_attributes": { "customer.tier": "paid" },
+        "reject_span_attributes": { "customer.tier": "paid" }
       },
       "run": [
         {
           "span": "contradiction",
           "attributes": { "customer.tier": "free" },
-          "contextAttributes": { "customer.tier": "paid" }
+          "context_attributes": { "customer.tier": "paid" }
         }
       ],
       "expect": { "sent": {} }
     },
     {
       "name": "reject_resource_key",
-      "init": { "rejectSpanAttributes": { "deploy.region": "blocked" } },
+      "init": { "reject_span_attributes": { "deploy.region": "blocked" } },
       "env": { "OTEL_RESOURCE_ATTRIBUTES": "deploy.region=blocked" },
       "run": [
         { "span": "resource.blocked" },
@@ -155,31 +155,31 @@
     },
     {
       "name": "concurrent_requests",
-      "init": { "requireSpanAttributes": { "customer.id": ["acme", "globex"] } },
+      "init": { "require_span_attributes": { "customer.id": ["acme", "globex"] } },
       "run": [
         {
           "concurrent": [
             {
               "agent": "support",
-              "contextAttributes": { "customer.id": "acme", "request.id": "r1" },
+              "context_attributes": { "customer.id": "acme", "request.id": "r1" },
               "children": [
                 { "sleep": 20 },
                 { "span": "r1.before" },
-                { "setContextAttributes": { "customer.id": "globex", "stage": "late" } },
+                { "set_context_attributes": { "customer.id": "globex", "stage": "late" } },
                 { "sleep": 20 },
                 { "span": "r1.after" }
               ]
             },
             {
               "agent": "triage",
-              "contextAttributes": { "customer.id": "initech", "request.id": "r2" },
+              "context_attributes": { "customer.id": "initech", "request.id": "r2" },
               "children": [
                 { "sleep": 10 },
                 { "span": "r2.child" },
                 { "sleep": 20 },
                 {
                   "span": "r2.override",
-                  "contextAttributes": { "customer.id": "acme" },
+                  "context_attributes": { "customer.id": "acme" },
                   "children": [{ "raw": "r2.override.library", "scope": "app.lib" }]
                 }
               ]
@@ -216,7 +216,7 @@
     },
     {
       "name": "resolver_from_arguments",
-      "init": { "requireSpanAttributes": { "customer.id": "acme" } },
+      "init": { "require_span_attributes": { "customer.id": "acme" } },
       "run": [
         {
           "wrapped": "resolved.acme",
@@ -230,7 +230,7 @@
           "wrapped": "resolver.throws",
           "args": ["acme"],
           "resolver": "throw",
-          "children": [{ "span": "resolver.throws.child", "contextAttributes": { "customer.id": "acme" } }]
+          "children": [{ "span": "resolver.throws.child", "context_attributes": { "customer.id": "acme" } }]
         }
       ],
       "expect": {
@@ -242,19 +242,19 @@
     },
     {
       "name": "invalid_empty_rules",
-      "init": { "requireSpanAttributes": {} },
+      "init": { "require_span_attributes": {} },
       "run": [{ "agent": "support" }],
       "expect": { "enabled": false, "sent": {} }
     },
     {
       "name": "invalid_padded_key",
-      "init": { "rejectSpanAttributes": { " customer.id": "x" } },
+      "init": { "reject_span_attributes": { " customer.id": "x" } },
       "run": [{ "agent": "support" }],
       "expect": { "enabled": false, "sent": {} }
     },
     {
       "name": "invalid_null_value",
-      "init": { "requireSpanAttributes": { "customer.id": null } },
+      "init": { "require_span_attributes": { "customer.id": null } },
       "run": [{ "agent": "support" }],
       "expect": { "enabled": false, "sent": {} }
     },
@@ -272,29 +272,29 @@
     },
     {
       "name": "env_rules_and_explicit_override",
-      "init": { "rejectSpanAttributes": { "customer.id": "blocked" } },
+      "init": { "reject_span_attributes": { "customer.id": "blocked" } },
       "env": {
         "CONVERGENT_REQUIRE_SPAN_ATTRIBUTES": "{\"customer.id\": [\"acme\", \"blocked\"]}",
         "CONVERGENT_REJECT_SPAN_ATTRIBUTES": "{\"customer.id\": [\"acme\"]}"
       },
       "run": [
-        { "span": "env.acme", "contextAttributes": { "customer.id": "acme" } },
-        { "span": "env.blocked", "contextAttributes": { "customer.id": "blocked" } }
+        { "span": "env.acme", "context_attributes": { "customer.id": "acme" } },
+        { "span": "env.blocked", "context_attributes": { "customer.id": "blocked" } }
       ],
       "expect": { "sent": { "env.acme": { "convergent.attributes.customer.id": "acme" } } }
     },
     {
       "name": "file_destination",
       "destination": "file",
-      "init": { "agents": ["support", "triage"], "requireSpanAttributes": { "customer.tier": "paid" } },
+      "init": { "agents": ["support", "triage"], "require_span_attributes": { "customer.tier": "paid" } },
       "run": [
         {
           "agent": "support",
-          "contextAttributes": { "customer.tier": "paid" },
+          "context_attributes": { "customer.tier": "paid" },
           "children": [{ "span": "file.paid.child" }]
         },
-        { "agent": "triage", "contextAttributes": { "customer.tier": "free" } },
-        { "agent": "billing", "contextAttributes": { "customer.tier": "paid" } }
+        { "agent": "triage", "context_attributes": { "customer.tier": "free" } },
+        { "agent": "billing", "context_attributes": { "customer.tier": "paid" } }
       ],
       "expect": {
         "sent": {
@@ -308,7 +308,7 @@
       "init": { "agents": ["support"] },
       "run": [
         {
-          "remote": { "traceId": "11111111111111111111111111111111", "spanId": "2222222222222222" },
+          "remote": { "trace_id": "11111111111111111111111111111111", "span_id": "2222222222222222" },
           "children": [
             { "raw": "remote.genai", "scope": "app.http", "attributes": { "gen_ai.request.model": "m" } },
             { "raw": "remote.litellm", "scope": "litellm.router" },

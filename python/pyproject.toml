@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "convergent-sdk"
-version = "0.0.11"
+version = "0.0.12"
 description = "Records your Python AI agent runs as OpenTelemetry spans and sends them to Convergent."
 readme = "README.md"
 license = "Apache-2.0"
@@ -35,6 +35,9 @@ dependencies = [
   "zstandard>=0.22",
 ]
 
+[project.optional-dependencies]
+temporal = ["temporalio[opentelemetry]>=1.34.0,<2"]
+
 [project.urls]
 Homepage = "https://convergent.dev"
 Repository = "https://github.com/convergent-technologies/convergent-sdk"
@@ -55,7 +58,8 @@ dev = [
   "pytest-xdist>=3.8",
   "ruff>=0.15",
   "pyrefly>=1.3.2",
-  "pydantic-ai-slim>=1.107.0",
+  "pydantic-ai-slim>=2.53.0",
+  "temporalio[opentelemetry]>=1.34.0,<2",
   "opentelemetry-instrumentation>=0.64b0",
 ]
 
@@ -68,6 +72,9 @@ include = ["src/**", "/README.md", "/LICENSE"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "pydantic_ai: runs pydantic-ai, which needs a newer OpenTelemetry than the temporal extra allows; the floor jobs split on it",
+]
 
 [tool.ruff]
 line-length = 100

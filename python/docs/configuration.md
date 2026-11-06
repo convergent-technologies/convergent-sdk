@@ -25,6 +25,9 @@ or later. Below 1.41.0, tracing works normally, but `FlushResult.dropped`
 always reads 0. The count of spans dropped from a full queue comes from an
 argument that `BatchSpanProcessor` gained in 1.41.0.
 
+The Temporal extra, `convergent-sdk[temporal]`, needs
+`temporalio>=1.34.0,<2`, which needs OpenTelemetry 1.26.0 or newer.
+
 The SDK sends spans over OTLP/HTTP, so it installs the HTTP exporter package.
 
 ## Convergent variables
@@ -90,6 +93,8 @@ A variable that is not set never fails a check. In the table, "a filter" means
 | A `File` destination's spans file cannot be opened, because the directory cannot be created or the file cannot be written. | `OSError` |
 | `tracer_provider` is not an OpenTelemetry SDK `TracerProvider`. | `TypeError` |
 | `debug` is not a bool. | `TypeError` |
+| `session_hosts` is not a list, such as `session_hosts="worker.example"`. | `TypeError` |
+| A `session_hosts` entry is not a string, or is empty. | `ValueError` |
 | `CONVERGENT_DEBUG`, `CONVERGENT_STRICT`, or `CONVERGENT_TRACES_EXPORTER` holds a value it does not recognize. | `ValueError` |
 
 `CONVERGENT_DEBUG` and `CONVERGENT_STRICT` accept `1`, `true`, `yes`, `on`, `0`,
@@ -101,8 +106,8 @@ still delivers. The configuration is rejected only when no destination is left.
 
 A rejection leaves the process as it was, with one exception. Checking that a
 `File` destination can be opened creates the file and any missing parent
-directories. No provider is installed and no deployment is registered, so a
-corrected `init()` call afterwards works.
+directories. No provider is installed, so a corrected `init()` call afterwards
+works.
 
 ## Destinations
 
@@ -150,7 +155,7 @@ The SDK inherits OpenTelemetry's own variables.
 
 | Variable                            | Effect                                         | Default |
 | ----------------------------------- | ---------------------------------------------- | ------- |
-| `OTEL_SERVICE_NAME`                 | display name sent with deployment registration | none    |
+| `OTEL_SERVICE_NAME`                 | `service.name` on a provider `init()` creates  | none    |
 | `OTEL_EXPORTER_OTLP_TIMEOUT`        | ceiling on one export                          | 10s     |
 | `OTEL_BSP_SCHEDULE_DELAY`           | how often a batch is exported                  | 5s      |
 | `OTEL_BSP_MAX_QUEUE_SIZE`           | span queue depth before the oldest is dropped  | 2048    |
@@ -182,6 +187,12 @@ tracing several agents does not multiply threads or flush time.
 
 Under sustained backpressure, the oldest span is dropped and OpenTelemetry logs
 `Queue full, dropping Span.` once per drop. `FlushResult.dropped` counts them.
+
+Every request to Convergent, span exports and `check()` included, carries
+`User-Agent: convergent-sdk-python/<version>`.
+
+Span exports refresh pooled connections before the managed ingest idle
+timeout. A read timeout gets one retry on a fresh connection.
 
 When a network export fails, the SDK retries, then discards the batch and logs
 an error. It does not spill the batch to disk, and your code never sees an

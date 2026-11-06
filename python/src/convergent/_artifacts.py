@@ -30,7 +30,6 @@ from collections import OrderedDict, deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from http.client import HTTPException
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -40,7 +39,14 @@ from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.trace import Span, format_trace_id
 
 from . import _transport
-from ._registry import _OPENER, _RETRYABLE_STATUS, backoff_delay
+from ._receiver_routes import ARTIFACT_PATH, REASON_HEADER, UPLOADS_OFF_REASON
+from ._registry import _RETRYABLE_STATUS, _opener, backoff_delay
+from ._telemetry_keys import (
+    CONVERGENT_ARTIFACTS_DROPPED,
+    CONVERGENT_ARTIFACTS_INPUT,
+    CONVERGENT_ARTIFACTS_OUTPUT,
+)
+from ._user_agent import USER_AGENT
 
 Role = Literal["input", "output"]
 #: Who supplied a file: an end user, the agent's own code, a model, a tool, or
@@ -58,18 +64,14 @@ Step = Literal["stored", "refused", "retry", "pause", "stop", "fail"]
 _State = Literal["open", "stopped", "closed"]
 
 LIST_KEYS: Mapping[Role, str] = {
-    "input": "convergent.artifacts.input",
-    "output": "convergent.artifacts.output",
+    "input": CONVERGENT_ARTIFACTS_INPUT,
+    "output": CONVERGENT_ARTIFACTS_OUTPUT,
 }
-DROPPED_KEY = "convergent.artifacts.dropped"
 
-#: The route says uploads are off for the organization with this error reason, and
-#: only with it, so a 403 or 404 from a proxy or a load balancer cannot turn
+#: The route says uploads are off for the organization with ``UPLOADS_OFF_REASON``,
+#: and only with it, so a 403 or 404 from a proxy or a load balancer cannot turn
 #: uploads off. Uploading and file lists pause for ``_PAUSE_S``, then the next
 #: file asks again.
-_UPLOADS_OFF_REASON = "artifact_uploads_disabled"
-#: Carries the reason on answers that have no body, such as a HEAD.
-_REASON_HEADER = "X-Convergent-Reason"
 _PAUSE_S = 600.0
 #: A bad key ends uploading and file lists for the rest of the process.
 _STOP_STATUS = frozenset({401})
@@ -78,20 +80,6 @@ _STOP_STATUS = frozenset({401})
 _REFUSED_STATUS = frozenset({413, 422})
 #: Read of an error body, enough for its ``details.reason``.
 _ERROR_BODY_BYTES = 4096
-
-
-def _user_agent() -> str:
-    # Two names because this module can ship under either distribution name.
-    for distribution in ("convergent-sdk", "convergent"):
-        try:
-            return f"convergent-sdk-python/{version(distribution)}"
-        except PackageNotFoundError:
-            continue
-    return "convergent-sdk-python/0.0.0"
-
-
-#: Names the SDK and its version on every upload, so the server can tell clients apart.
-_USER_AGENT = _user_agent()
 
 #: OpenTelemetry drops span events past 128 and the normalizer rejects a span
 #: past 1,024 attributes and events, so files are packed into one attribute per
@@ -214,7 +202,7 @@ def attach(
                     capture = None
             if capture is None:
                 held.dropped += 1
-                span.set_attribute(DROPPED_KEY, held.dropped)
+                span.set_attribute(CONVERGENT_ARTIFACTS_DROPPED, held.dropped)
             else:
                 held.captures.append(capture)
                 _held_bytes += capture.size_bytes
@@ -227,7 +215,7 @@ def attach(
                 "artifact_held_full",
                 f"Convergent did not record a file because files held for spans that "
                 f"have not ended passed {_HELD_BYTES // (1024 * 1024)} MiB. The span "
-                f"counts it in {DROPPED_KEY}.",
+                f"counts it in {CONVERGENT_ARTIFACTS_DROPPED}.",
             )
     except Exception:  # noqa: BLE001 - a raise here would break the caller's request
         _warn_once("artifact_attach_failed", "Convergent could not record a file on a span.")
@@ -293,7 +281,7 @@ class _Uploader:
     """
 
     def __init__(self, api_key: str, endpoint: str) -> None:
-        self._url = f"{endpoint.rstrip('/')}/v1/artifacts/"
+        self._endpoint = endpoint.rstrip("/")
         self._authorization = f"Bearer {api_key}"
         self._state: _State = "open"
         #: Until this ``time.monotonic()`` reading, the route said uploads are off.
@@ -398,15 +386,14 @@ class _Uploader:
             return self._sending
 
     def _deliver(self, capture: _Capture) -> Step:
-        held = _route_holds(self._url + capture.digest, self._authorization, capture.size_bytes)
+        url = self._endpoint + ARTIFACT_PATH.format(digest=capture.digest)
+        held = _route_holds(url, self._authorization, capture.size_bytes)
         if held != "absent":
             # The off answer comes before any bytes, which matters: a large PUT
             # refused before its body is read ends in a broken pipe, not the 403.
             return "stored" if held == "held" else "pause"
         body, headers = _encoded(capture, self._authorization)
-        request = urllib.request.Request(
-            self._url + capture.digest, data=body, headers=headers, method="PUT"
-        )
+        request = urllib.request.Request(url, data=body, headers=headers, method="PUT")
         step: Step = "retry"
         for attempt in range(_ATTEMPTS):
             step, retry_after = _put(request)
@@ -475,7 +462,7 @@ def _capture(
             "artifact_media_type",
             f"Convergent did not record a file whose media_type is not printable "
             f"ASCII of at most {_MEDIA_TYPE_CHARS} characters, such as 'text/csv'. "
-            f"The span counts it in {DROPPED_KEY}.",
+            f"The span counts it in {CONVERGENT_ARTIFACTS_DROPPED}.",
         )
         return None
     if origin is not None and origin not in _ORIGINS:
@@ -505,7 +492,7 @@ def _capture(
                 "artifact_unreadable",
                 f"Convergent could not read a file passed to input_artifact() or "
                 f"output_artifact() ({type(error).__name__}). The span counts it in "
-                f"{DROPPED_KEY}.",
+                f"{CONVERGENT_ARTIFACTS_DROPPED}.",
             )
             return None
     else:
@@ -519,7 +506,7 @@ def _capture(
         _warn_once(
             "artifact_too_large",
             f"Convergent did not record a file larger than {_FILE_BYTES // (1024 * 1024)} "
-            f"MiB. The span counts it in {DROPPED_KEY}.",
+            f"MiB. The span counts it in {CONVERGENT_ARTIFACTS_DROPPED}.",
         )
         return None
     body, sha256, size = copied
@@ -563,7 +550,7 @@ def _encoded(capture: _Capture, authorization: str) -> tuple[bytes, dict[str, st
     body = capture.body.read()
     headers = {
         "Authorization": authorization,
-        "User-Agent": _USER_AGENT,
+        "User-Agent": USER_AGENT,
         "Content-Type": capture.media_type,
         "X-Convergent-Trace-Id": capture.trace_id,
     }
@@ -582,15 +569,15 @@ def _route_holds(url: str, authorization: str, size_bytes: int) -> Literal["held
     is its size. ``off`` when the route says uploads are off. Any other answer
     sends it, so a proxy that answers 200 to everything cannot make uploads stop."""
     request = urllib.request.Request(
-        url, headers={"Authorization": authorization, "User-Agent": _USER_AGENT}, method="HEAD"
+        url, headers={"Authorization": authorization, "User-Agent": USER_AGENT}, method="HEAD"
     )
     try:
-        with _OPENER.open(request, timeout=_REQUEST_TIMEOUT_S) as response:
+        with _opener().open(request, timeout=_REQUEST_TIMEOUT_S) as response:
             same_size = response.headers.get("Content-Length") == str(size_bytes)
             return "held" if response.status == 200 and same_size else "absent"
     except urllib.error.HTTPError as error:
         error.close()
-        return "off" if error.headers.get(_REASON_HEADER) == _UPLOADS_OFF_REASON else "absent"
+        return "off" if error.headers.get(REASON_HEADER) == UPLOADS_OFF_REASON else "absent"
     except (OSError, HTTPException):
         return "absent"
 
@@ -598,11 +585,11 @@ def _route_holds(url: str, authorization: str, size_bytes: int) -> Literal["held
 def _put(request: urllib.request.Request) -> tuple[Step, float | None]:
     """One attempt, and the ``Retry-After`` seconds the route asked for, if any."""
     try:
-        with _OPENER.open(request, timeout=_REQUEST_TIMEOUT_S) as response:
+        with _opener().open(request, timeout=_REQUEST_TIMEOUT_S) as response:
             return _step(response.status), None
     except urllib.error.HTTPError as error:
         try:
-            reason = error.headers.get(_REASON_HEADER) or _error_reason(
+            reason = error.headers.get(REASON_HEADER) or _error_reason(
                 error.read(_ERROR_BODY_BYTES)
             )
         except (OSError, HTTPException):
@@ -628,7 +615,7 @@ def _error_reason(body: bytes) -> str | None:
 def _step(status: int, reason: str | None = None) -> Step:
     if 200 <= status < 300:
         return "stored"
-    if reason == _UPLOADS_OFF_REASON:
+    if reason == UPLOADS_OFF_REASON:
         return "pause"
     if status in _STOP_STATUS:
         return "stop"
@@ -687,4 +674,4 @@ def _reset_for_tests() -> None:
         _held_bytes = 0
 
 
-__all__ = ["DROPPED_KEY", "LIST_KEYS", "UploadProcessor", "attach", "current", "release", "start"]
+__all__ = ["LIST_KEYS", "UploadProcessor", "attach", "current", "release", "start"]

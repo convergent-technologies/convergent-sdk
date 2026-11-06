@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
+from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY, Context, set_value
 from opentelemetry.metrics import Counter, Meter, MeterProvider, NoOpCounter, NoOpMeter
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.semconv.attributes.error_attributes import ERROR_TYPE
 from opentelemetry.util.types import Attributes
+
+from ._litellm import without_request_copies
+from ._processors import evicted_stamp_keys, trajectory_stamp, with_attributes
+from ._receiver_routes import TRACES_PATH
+from ._telemetry_keys import CONVERGENT_SDK_VERSION
+from ._user_agent import USER_AGENT
+from ._version import sdk_version
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -23,11 +33,89 @@ logger = logging.getLogger("convergent.sdk")
 _INTERNAL_METRICS = "OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED"
 _QUEUE_FULL = "queue_full"
 _CONTENT_TOO_LARGE = 413
+# The managed ingest ALB retires idle connections after 60 seconds.
+_IDLE_CONNECTION_REFRESH_S = 55.0
+_FRESH_CONNECTION_RETRY_RESERVE_S = 5.0
+_DEFAULT_EXPORT_TIMEOUT_S = 10.0
 #: The suppression key that predates the per-process one in ``opentelemetry.context``.
 #: ``is_instrumentation_enabled`` reads both, so a request that must record no span
 #: sets both. Written out rather than imported, because it lives in the
 #: instrumentation package and this SDK depends on the API and the SDK only.
 _SUPPRESS_INSTRUMENTATION_KEY_PLAIN = "suppress_instrumentation"
+
+
+class _ExportDiagnostics:
+    """Safe facts from one network export, without request or response content."""
+
+    def __init__(self) -> None:
+        self._started = 0.0
+        self._attempt_count = 0
+        self._status_code: int | None = None
+        self._exception_type: str | None = None
+        self._cause_type: str | None = None
+
+    def begin(self) -> None:
+        self._started = time.monotonic()
+        self._attempt_count = 0
+        self._status_code = None
+        self._exception_type = None
+        self._cause_type = None
+
+    def record_attempt(self) -> int:
+        self._attempt_count += 1
+        return self._attempt_count
+
+    def record_response(self, status_code: int) -> None:
+        self._status_code = status_code
+        self._exception_type = None
+        self._cause_type = None
+
+    def record_exception(self, error: Exception) -> None:
+        self._status_code = None
+        self._exception_type = type(error).__name__
+        cause = error
+        seen = {id(error)}
+        while (next_error := cause.__cause__ or cause.__context__) is not None:
+            if id(next_error) in seen:
+                break
+            seen.add(id(next_error))
+            cause = next_error
+        cause_type = type(cause).__name__
+        self._cause_type = cause_type if cause_type != self._exception_type else None
+
+    def report_failure(self, span_count: int) -> None:
+        elapsed_ms = max(0, int((time.monotonic() - self._started) * 1_000))
+        if self._status_code is not None:
+            last_outcome = "http_status"
+            detail = f"Last observed collector response was HTTP {self._status_code}"
+        elif self._exception_type is not None:
+            last_outcome = "request_exception"
+            detail = f"Last observed request exception was {self._exception_type}"
+            if self._cause_type is not None:
+                detail += f" from {self._cause_type}"
+        else:
+            last_outcome = "exporter_failure"
+            detail = (
+                "OpenTelemetry returned failure without an observed response or request exception"
+            )
+        logger.error(
+            "Convergent lost %d span(s) after %d export attempt(s) in %dms. %s. "
+            "The application continued.",
+            span_count,
+            self._attempt_count,
+            elapsed_ms,
+            detail,
+            extra={
+                "event": "convergent.sdk.export_failed",
+                "last_outcome": last_outcome,
+                "exception_type": self._exception_type,
+                "cause_type": self._cause_type,
+                "status_code": self._status_code,
+                "attempt_count": self._attempt_count,
+                "span_count": span_count,
+                "elapsed_ms": elapsed_ms,
+            },
+        )
 
 
 def suppressed() -> Context:
@@ -46,15 +134,23 @@ def suppressed() -> Context:
 class _ResponseHook:
     """Reads the collector's answer to each export request the session makes."""
 
-    def __init__(self) -> None:
+    def __init__(self, diagnostics: _ExportDiagnostics) -> None:
         self._rejected = False
         self._reported_too_large = False
+        self._diagnostics = diagnostics
 
     def is_rejected(self) -> bool:
         return self._rejected
 
-    def __call__(self, response: Response, **_: Any) -> None:
+    def __call__(self, response: Response, **_kwargs: Any) -> None:
         status = response.status_code
+        self._diagnostics.record_response(status)
+        if status >= 400:
+            # Supported OpenTelemetry exporter versions log either ``reason`` or
+            # the response body. Neither is safe to copy into a customer's logs.
+            _ = response.content
+            response.reason = f"HTTP {status}"
+            response._content = b""
         if status in (401, 403) and not self._rejected:
             self._rejected = True
             logger.warning(
@@ -132,16 +228,72 @@ def lost_spans() -> int:
     return count
 
 
+@functools.cache
+def _sdk_version_label() -> str:
+    return f"python/{sdk_version()}"
+
+
+def _naming_the_sdk(span: ReadableSpan) -> ReadableSpan:
+    """A copy of ``span`` that carries ``convergent.sdk.version`` and its whole stamp.
+
+    The span itself is shared with every other processor on the provider and is
+    frozen once it ends, so the key goes only on this copy: the customer's own
+    exporters never see it. The copy has no attribute limit, so a span that
+    filled its limit still names the SDK, and it keeps the span's drop counts.
+    The stamp is written back from the span's private field, because a span that
+    filled its limit after it started has lost the stamp from its attributes,
+    and a span naming the SDK without one would read as unstamped to ingest.
+    """
+    attributes = BoundedAttributes(
+        attributes={
+            **(span.attributes or {}),
+            **trajectory_stamp(span),
+            CONVERGENT_SDK_VERSION: _sdk_version_label(),
+        }
+    )
+    # The stamp keys written back here arrive, so they are not lost.
+    attributes.dropped = max(span.dropped_attributes - evicted_stamp_keys(span), 0)
+    return with_attributes(span, attributes)
+
+
+def _named_or_as_it_came(span: ReadableSpan) -> ReadableSpan:
+    """``span`` named for the SDK, or as it came when the copy fails.
+
+    One span the SDK cannot copy goes out without the version key rather than
+    taking its whole batch down, as the litellm trim falls back to the batch as
+    it came.
+    """
+    try:
+        return _naming_the_sdk(span)
+    except Exception:
+        from . import _core  # deferred: _core imports this module
+
+        logger.debug("Convergent could not copy a span to name the SDK", exc_info=True)
+        _core._warn_once("sdk_version_copy", "Convergent could not add its SDK version to a span")
+        return span
+
+
 class _LossCountingExporter(SpanExporter):
     """Counts the spans the wrapped exporter failed to deliver.
+
+    Each span goes out as a copy that names the SDK (:func:`_naming_the_sdk`).
+    Ingest tells a stamping SDK's spans apart by that key. Each batch also goes
+    out without litellm's second copy of a model call's request
+    (:func:`without_request_copies`), so every destination sends it once.
 
     ``rejected`` says whether the collector has refused the credentials. Once it
     has, a batch is counted as lost without being encoded or sent.
     """
 
-    def __init__(self, exporter: SpanExporter, rejected: Callable[[], bool] | None) -> None:
+    def __init__(
+        self,
+        exporter: SpanExporter,
+        rejected: Callable[[], bool] | None,
+        diagnostics: _ExportDiagnostics | None,
+    ) -> None:
         self._exporter = exporter
         self._rejected = rejected
+        self._diagnostics = diagnostics
 
     def _credentials_rejected(self) -> bool:
         return self._rejected is not None and self._rejected()
@@ -150,13 +302,21 @@ class _LossCountingExporter(SpanExporter):
         if self._credentials_rejected():
             _record_lost(len(spans))
             return SpanExportResult.FAILURE
+        if self._diagnostics is not None:
+            self._diagnostics.begin()
         try:
-            result = self._exporter.export(spans)
+            result = self._exporter.export(
+                without_request_copies([_named_or_as_it_came(span) for span in spans])
+            )
         except Exception:
             _record_lost(len(spans))
+            if self._diagnostics is not None:
+                self._diagnostics.report_failure(len(spans))
             raise
         if result is not SpanExportResult.SUCCESS:
             _record_lost(len(spans))
+            if self._diagnostics is not None:
+                self._diagnostics.report_failure(len(spans))
         return result
 
     def force_flush(self, timeout_millis: int = 30_000) -> bool:
@@ -187,7 +347,10 @@ _metrics_gate = threading.Lock()
 
 
 def batch_processor(
-    exporter: SpanExporter, *, rejected: Callable[[], bool] | None = None
+    exporter: SpanExporter,
+    *,
+    rejected: Callable[[], bool] | None = None,
+    diagnostics: _ExportDiagnostics | None = None,
 ) -> BatchSpanProcessor:
     """A batch processor whose dropped spans are counted by :func:`dropped_spans`.
 
@@ -202,7 +365,7 @@ def batch_processor(
     and a box can carry an older one. There, fall back to a processor with no drop-count
     telemetry rather than let the whole trace be lost.
     """
-    wrapped = _LossCountingExporter(exporter, rejected)
+    wrapped = _LossCountingExporter(exporter, rejected, diagnostics)
     with _metrics_gate:
         previous = os.environ.get(_INTERNAL_METRICS)
         os.environ[_INTERNAL_METRICS] = "true"
@@ -236,18 +399,96 @@ def build_processor(*, api_key: str, endpoint: str) -> SpanProcessor:
     # the network at all.
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from requests import Session
+    from requests.exceptions import (
+        ConnectionError as RequestConnectionError,
+    )
+    from requests.exceptions import RequestException, Timeout
 
     warn_on_conflicting_auth_header()
+    diagnostics = _ExportDiagnostics()
     session = Session()
+    send = session.send
+    last_send_finished_at: float | None = None
+    request_timeout = _configured_export_timeout()
+    retry_reserve = min(_FRESH_CONNECTION_RETRY_RESERVE_S, max(0.0, request_timeout / 2))
+
+    def safe_request_error(error: RequestException) -> RequestException:
+        if isinstance(error, Timeout):
+            return Timeout()
+        if isinstance(error, RequestConnectionError):
+            return RequestConnectionError()
+        return RequestException()
+
+    def send_attempt(request: Any, kwargs: dict[str, Any]) -> Any:
+        try:
+            return send(request, **kwargs)
+        except RequestException as error:
+            diagnostics.record_exception(error)
+            if isinstance(error, (RequestConnectionError, Timeout)):
+                session.close()
+            raise safe_request_error(error) from None
+        except Exception as error:
+            diagnostics.record_exception(error)
+            raise
+
+    def send_with_diagnostics(request: Any, **kwargs: Any) -> Any:
+        nonlocal last_send_finished_at
+        now = time.monotonic()
+        if (
+            last_send_finished_at is not None
+            and now - last_send_finished_at >= _IDLE_CONNECTION_REFRESH_S
+        ):
+            session.close()
+        attempt = diagnostics.record_attempt()
+        timeout = kwargs.get("timeout")
+        started_at = time.monotonic()
+        if isinstance(timeout, int | float):
+            kwargs["timeout"] = min(timeout, request_timeout)
+        try:
+            return send_attempt(request, kwargs)
+        except Timeout:
+            if attempt == 1 and isinstance(timeout, int | float) and retry_reserve > 0:
+                remaining = timeout - (time.monotonic() - started_at)
+                retry_timeout = min(retry_reserve, remaining)
+                if retry_timeout > 0:
+                    kwargs["timeout"] = retry_timeout
+                    diagnostics.record_attempt()
+                    return send_attempt(request, kwargs)
+            raise
+        finally:
+            last_send_finished_at = time.monotonic()
+
+    session.send = send_with_diagnostics
     session.headers.update({"Authorization": f"Bearer {api_key}"})
-    hook = _ResponseHook()
+    hook = _ResponseHook(diagnostics)
     session.hooks["response"].append(hook)
     exporter = OTLPSpanExporter(
-        endpoint=f"{endpoint.rstrip('/')}/v1/traces",
+        endpoint=f"{endpoint.rstrip('/')}{TRACES_PATH}",
         session=session,
+        headers={"User-Agent": USER_AGENT},
         compression=_compression(),
+        timeout=request_timeout + retry_reserve,
     )
-    return batch_processor(exporter, rejected=hook.is_rejected)
+    # Older exporters overwrite constructor headers with their own defaults.
+    session.headers["User-Agent"] = USER_AGENT
+    return batch_processor(exporter, rejected=hook.is_rejected, diagnostics=diagnostics)
+
+
+def _configured_export_timeout() -> float:
+    raw = (
+        os.environ.get("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT")
+        or os.environ.get("OTEL_EXPORTER_OTLP_TIMEOUT")
+        or str(_DEFAULT_EXPORT_TIMEOUT_S)
+    )
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid OTLP export timeout %r; using %.0f seconds",
+            raw,
+            _DEFAULT_EXPORT_TIMEOUT_S,
+        )
+        return _DEFAULT_EXPORT_TIMEOUT_S
 
 
 def _compression() -> Compression:

@@ -18,6 +18,10 @@ A span with no parent at all is kept only by naming a declared agent. It starts 
 trace inside this process, so it would name its agent if it had one. Judging it on
 attributes instead would send any root span carrying a ``gen_ai.*`` attribute,
 which is the opposite of what naming your agents asked for.
+
+A dropped span still passes on what its kept descendants need: the filter calls
+``on_drop`` with each span it drops, and ``wrap()`` uses that to hand the
+dropped span's inherited trajectory stamp on to its children.
 """
 
 from __future__ import annotations
@@ -25,10 +29,12 @@ from __future__ import annotations
 import os
 import threading
 import weakref
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
+
+from ._telemetry_keys import GEN_AI_AGENT_NAME
 
 #: Unfinished spans remembered at once. A span that never ends never leaves the table.
 _KEPT_LIMIT = 4_096
@@ -50,9 +56,17 @@ class DeclaredAgentFilter(SpanProcessor):
     the parent lookup always finds a parent that was kept.
     """
 
-    def __init__(self, agents: Iterable[str], destinations: Sequence[SpanProcessor]) -> None:
+    def __init__(
+        self,
+        agents: Iterable[str],
+        destinations: Sequence[SpanProcessor],
+        on_drop: Callable[[Span, Context | None], None] | None = None,
+    ) -> None:
         self._agents = frozenset(agents)
         self._destinations = tuple(destinations)
+        #: Called with each span this drops, so a kept descendant can still
+        #: inherit what passed through it.
+        self._on_drop = on_drop
         #: Kept span ids, oldest first. A dict rather than a set so the oldest
         #: entry can be evicted when the table is full.
         self._kept: dict[int, None] = {}
@@ -61,6 +75,8 @@ class DeclaredAgentFilter(SpanProcessor):
 
     def on_start(self, span: Span, parent_context: Context | None = None) -> None:
         if not self._keep(span):
+            if self._on_drop is not None:
+                self._on_drop(span, parent_context)
             return
         self._remember(span.get_span_context().span_id)
         for destination in self._destinations:
@@ -99,7 +115,7 @@ class DeclaredAgentFilter(SpanProcessor):
         """
         if not self._agents:
             return False
-        agent = (span.attributes or {}).get("gen_ai.agent.name")
+        agent = (span.attributes or {}).get(GEN_AI_AGENT_NAME)
         if isinstance(agent, str) and agent:
             return agent in self._agents
         # span.parent, not parent_context: parent_context is None in the normal case.

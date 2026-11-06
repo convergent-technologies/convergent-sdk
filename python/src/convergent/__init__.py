@@ -9,13 +9,14 @@ This file is maintained by hand; a check keeps ``__all__`` complete.
 from __future__ import annotations
 
 from importlib import import_module
-from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
+from . import _version
 from ._artifacts import ArtifactOrigin
 from ._check import Note, Report, check
 from ._core import FlushResult, Status, flush, init, tracer_provider
 from ._destinations import Console, Destination, File
+from ._propagation import public_propagator as propagator
 from ._semantic import (
     ContextAttributes,
     SpanHandle,
@@ -29,12 +30,7 @@ from ._semantic import (
     tool,
 )
 
-try:
-    __version__ = version("convergent-sdk")
-except PackageNotFoundError:
-    # A checkout that runs the SDK from source has no convergent-sdk
-    # distribution to ask.
-    __version__ = "0.0.0"
+__version__ = _version.sdk_version()
 
 __all__ = [
     "__version__",
@@ -60,11 +56,12 @@ __all__ = [
     "ArtifactOrigin",
     "Report",
     "Note",
+    "propagator",
 ]
 
 #: Public submodules, reachable as ``convergent.<name>`` after ``import
 #: convergent`` alone. Kept out of ``__all__``, which lists the calls and types.
-__submodules__ = ["otel"]
+__submodules__ = ["otel", "carrier", "temporal"]
 
 
 def __getattr__(name: str) -> Any:

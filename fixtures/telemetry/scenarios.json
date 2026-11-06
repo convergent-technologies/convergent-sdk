@@ -1,0 +1,1085 @@
+{
+  "description": "What the Python and TypeScript SDKs write on each span today. Keys are snake_case and name no language's API; each SDK's test driver maps them to its own. A proof runner loads each scenario in a fresh process with CONVERGENT_RELEASE=r1: it starts the SDK with the `init` options and the `env` variables, runs the `run` tree, then sends everything. `case` says what a scenario proves about its call: success, error, or cancel. `expect.sent` names every span Convergent should receive, its status (UNSET, OK, or ERROR), and every convergent.* and gen_ai.* label it carries, with the exact value. A span not listed, or a convergent.* or gen_ai.* label not listed, fails. Message, tool call, agent tool, and file list labels arrive as JSON text and compare as parsed JSON. `$span_id:<name>` and `$start_time:<name>` (microseconds) stand for the id and start of the one sent span with that name. Every registry key appears here, and every operation has a success case and an error case.",
+  "nodes": {
+    "agent": "agent_run span named by the value. Span name is `invoke_agent <name>`. Takes what `span` takes.",
+    "span": "SDK span with `operation` (default retrieval) named by the value. A tool_call span is named `execute_tool <name>`. `model`, `system_instructions`, `tools`, `attributes`, and `context_attributes` are span options. Inside the span, in order: record `input` as the span's input, record `tool_call_id` as its tool call id, attach each of `artifacts` ({role, text, filename, media_type, origin}) as an input or output file holding the text's bytes, run the `children`, then record `output` as the span's output, or record each of `outputs` as it in turn. `raises: error` then fails the call with an error inside the span, and `raises: cancel` cancels it, each in its language's usual way; the runner catches either outside the span. Inside `input`, `output`, and `tools`, the object `{\"$unportable\": \"nan\"}` stands for the language's not-a-number float and `{\"$unportable\": \"date\"}` for its date type, set to 2026-11-03T00:00:00Z: values JSON cannot hold.",
+    "session": "Runs `children` inside a session with this id.",
+    "raw": "Plain OpenTelemetry span from the tracer named `scope`, started in the active context with `attributes`. `late_attributes` are set after it starts."
+  },
+  "scenarios": [
+    {
+      "name": "agent_run_success",
+      "case": "success",
+      "run": [
+        {
+          "agent": "support",
+          "model": "gpt-4o",
+          "system_instructions": "Answer billing questions.",
+          "tools": [{ "name": "lookup_invoice", "description": "Find an invoice by number" }],
+          "input": "Where is invoice 1042?",
+          "output": "Invoice 1042 was paid."
+        }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent support": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "support",
+              "gen_ai.agent.version": "r1",
+              "gen_ai.request.model": "gpt-4o",
+              "convergent.agent.system_instructions": "Answer billing questions.",
+              "convergent.agent.tools": [
+                { "name": "lookup_invoice", "description": "Find an invoice by number" }
+              ],
+              "gen_ai.input.messages": [
+                { "role": "user", "parts": [{ "type": "text", "content": "Where is invoice 1042?" }] }
+              ],
+              "gen_ai.output.messages": [
+                {
+                  "role": "assistant",
+                  "parts": [{ "type": "text", "content": "Invoice 1042 was paid." }]
+                }
+              ],
+              "convergent.content.source": "sdk",
+              "convergent.invocation.span_id": "$span_id:invoke_agent support",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "agent_run_error",
+      "case": "error",
+      "run": [
+        {
+          "agent": "support",
+          "input": "Where is invoice 1042?",
+          "output": "Invoice 1042 was",
+          "raises": "error"
+        }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent support": {
+            "status": "ERROR",
+            "attributes": {
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "support",
+              "gen_ai.agent.version": "r1",
+              "gen_ai.input.messages": [
+                { "role": "user", "parts": [{ "type": "text", "content": "Where is invoice 1042?" }] }
+              ],
+              "convergent.content.source": "sdk",
+              "convergent.invocation.span_id": "$span_id:invoke_agent support",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "model_call_success",
+      "case": "success",
+      "run": [
+        {
+          "span": "answer",
+          "operation": "model_call",
+          "model": "gpt-4o",
+          "input": [
+            {
+              "role": "system",
+              "parts": [{ "type": "text", "content": "Answer billing questions." }]
+            },
+            { "role": "user", "parts": [{ "type": "text", "content": "Where is invoice 1042?" }] }
+          ],
+          "output": { "answer": "Paid." }
+        }
+      ],
+      "expect": {
+        "sent": {
+          "answer": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "chat",
+              "gen_ai.request.model": "gpt-4o",
+              "gen_ai.input.messages": [
+                {
+                  "role": "system",
+                  "parts": [{ "type": "text", "content": "Answer billing questions." }]
+                },
+                {
+                  "role": "user",
+                  "parts": [{ "type": "text", "content": "Where is invoice 1042?" }]
+                }
+              ],
+              "gen_ai.output.messages": [
+                {
+                  "role": "assistant",
+                  "parts": [{ "type": "text", "content": "{\"answer\":\"Paid.\"}" }]
+                }
+              ],
+              "convergent.content.source": "sdk"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "model_call_error",
+      "case": "error",
+      "run": [
+        {
+          "span": "answer",
+          "operation": "model_call",
+          "input": "Where is invoice 1042?",
+          "output": "Invoice 1042 was",
+          "raises": "error"
+        }
+      ],
+      "expect": {
+        "sent": {
+          "answer": {
+            "status": "ERROR",
+            "attributes": {
+              "gen_ai.operation.name": "chat",
+              "gen_ai.input.messages": [
+                { "role": "user", "parts": [{ "type": "text", "content": "Where is invoice 1042?" }] }
+              ],
+              "convergent.content.source": "sdk"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "model_call_cancelled",
+      "case": "cancel",
+      "run": [
+        {
+          "span": "answer",
+          "operation": "model_call",
+          "input": "Where is invoice 1042?",
+          "output": "Invoice 1042 was",
+          "raises": "cancel"
+        }
+      ],
+      "expect": {
+        "sent": {
+          "answer": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "chat",
+              "gen_ai.input.messages": [
+                { "role": "user", "parts": [{ "type": "text", "content": "Where is invoice 1042?" }] }
+              ],
+              "convergent.content.source": "sdk"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "tool_call_success",
+      "case": "success",
+      "run": [
+        {
+          "span": "lookup_invoice",
+          "operation": "tool_call",
+          "input": { "invoice": 1042 },
+          "tool_call_id": "call_1042",
+          "output": { "status": "paid" }
+        }
+      ],
+      "expect": {
+        "sent": {
+          "execute_tool lookup_invoice": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "execute_tool",
+              "gen_ai.tool.name": "lookup_invoice",
+              "gen_ai.tool.type": "function",
+              "gen_ai.tool.call.id": "call_1042",
+              "gen_ai.tool.call.arguments": { "invoice": 1042 },
+              "gen_ai.tool.call.result": { "status": "paid" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "tool_call_error",
+      "case": "error",
+      "run": [
+        {
+          "span": "lookup_invoice",
+          "operation": "tool_call",
+          "input": { "invoice": 1042 },
+          "output": { "status": "pai" },
+          "raises": "error"
+        }
+      ],
+      "expect": {
+        "sent": {
+          "execute_tool lookup_invoice": {
+            "status": "ERROR",
+            "attributes": {
+              "gen_ai.operation.name": "execute_tool",
+              "gen_ai.tool.name": "lookup_invoice",
+              "gen_ai.tool.type": "function",
+              "gen_ai.tool.call.arguments": { "invoice": 1042 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "tool_call_drops_arguments_that_are_not_portable_json",
+      "case": "success",
+      "run": [
+        {
+          "span": "lookup_invoice",
+          "operation": "tool_call",
+          "input": { "paid_after": { "$unportable": "date" } },
+          "output": "Invoice 1042 was paid."
+        }
+      ],
+      "expect": {
+        "sent": {
+          "execute_tool lookup_invoice": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "execute_tool",
+              "gen_ai.tool.name": "lookup_invoice",
+              "gen_ai.tool.type": "function",
+              "gen_ai.tool.call.result": "Invoice 1042 was paid."
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "model_call_drops_content_that_is_not_portable_json",
+      "case": "success",
+      "run": [
+        {
+          "span": "answer",
+          "operation": "model_call",
+          "input": [
+            {
+              "role": "user",
+              "parts": [{ "type": "text", "content": "Where is invoice 1042?" }],
+              "score": { "$unportable": "nan" }
+            }
+          ],
+          "output": { "$unportable": "date" }
+        }
+      ],
+      "expect": {
+        "sent": {
+          "answer": {
+            "status": "UNSET",
+            "attributes": { "gen_ai.operation.name": "chat" }
+          }
+        }
+      }
+    },
+    {
+      "name": "model_call_dropped_output_clears_an_earlier_one",
+      "case": "success",
+      "run": [
+        {
+          "span": "answer",
+          "operation": "model_call",
+          "outputs": ["Invoice 1042 was", { "$unportable": "date" }]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "answer": {
+            "status": "UNSET",
+            "attributes": { "gen_ai.operation.name": "chat" }
+          }
+        }
+      }
+    },
+    {
+      "name": "agent_run_drops_tools_that_are_not_portable_json",
+      "case": "success",
+      "run": [
+        {
+          "agent": "support",
+          "tools": [{ "name": "lookup_invoice", "timeout": { "$unportable": "nan" } }]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent support": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "support",
+              "gen_ai.agent.version": "r1",
+              "convergent.invocation.span_id": "$span_id:invoke_agent support",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "empty_model_name_is_dropped",
+      "case": "success",
+      "run": [{ "span": "embed_query", "operation": "embeddings", "model": "" }],
+      "expect": {
+        "sent": {
+          "embed_query": {
+            "status": "UNSET",
+            "attributes": { "gen_ai.operation.name": "embeddings" }
+          }
+        }
+      }
+    },
+    {
+      "name": "retrieval_success",
+      "case": "success",
+      "run": [{ "span": "search_docs", "operation": "retrieval", "input": 42 }],
+      "expect": {
+        "sent": {
+          "search_docs": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "retrieval",
+              "gen_ai.input.messages": [
+                { "role": "user", "parts": [{ "type": "text", "content": "42" }] }
+              ],
+              "convergent.content.source": "sdk"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "retrieval_error",
+      "case": "error",
+      "run": [{ "span": "search_docs", "operation": "retrieval", "raises": "error" }],
+      "expect": {
+        "sent": {
+          "search_docs": {
+            "status": "ERROR",
+            "attributes": {
+              "gen_ai.operation.name": "retrieval"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "embeddings_success",
+      "case": "success",
+      "run": [{ "span": "embed_query", "operation": "embeddings", "model": "text-embedding-3-small" }],
+      "expect": {
+        "sent": {
+          "embed_query": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "embeddings",
+              "gen_ai.request.model": "text-embedding-3-small"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "embeddings_error",
+      "case": "error",
+      "run": [{ "span": "embed_query", "operation": "embeddings", "raises": "error" }],
+      "expect": {
+        "sent": {
+          "embed_query": {
+            "status": "ERROR",
+            "attributes": {
+              "gen_ai.operation.name": "embeddings"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "workflow_success",
+      "case": "success",
+      "run": [{ "span": "triage", "operation": "workflow" }],
+      "expect": {
+        "sent": {
+          "triage": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "invoke_workflow"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "workflow_error",
+      "case": "error",
+      "run": [{ "span": "triage", "operation": "workflow", "raises": "error" }],
+      "expect": {
+        "sent": {
+          "triage": {
+            "status": "ERROR",
+            "attributes": {
+              "gen_ai.operation.name": "invoke_workflow"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "agent_create_success",
+      "case": "success",
+      "run": [{ "span": "create_support_agent", "operation": "agent_create" }],
+      "expect": {
+        "sent": {
+          "create_support_agent": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "create_agent"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "agent_create_error",
+      "case": "error",
+      "run": [{ "span": "create_support_agent", "operation": "agent_create", "raises": "error" }],
+      "expect": {
+        "sent": {
+          "create_support_agent": {
+            "status": "ERROR",
+            "attributes": {
+              "gen_ai.operation.name": "create_agent"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "text_completion_success",
+      "case": "success",
+      "run": [{ "span": "complete", "operation": "text_completion" }],
+      "expect": {
+        "sent": {
+          "complete": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "text_completion"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "text_completion_error",
+      "case": "error",
+      "run": [{ "span": "complete", "operation": "text_completion", "raises": "error" }],
+      "expect": {
+        "sent": {
+          "complete": {
+            "status": "ERROR",
+            "attributes": {
+              "gen_ai.operation.name": "text_completion"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "generate_content_success",
+      "case": "success",
+      "run": [{ "span": "generate_summary", "operation": "generate_content" }],
+      "expect": {
+        "sent": {
+          "generate_summary": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "generate_content"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "generate_content_error",
+      "case": "error",
+      "run": [{ "span": "generate_summary", "operation": "generate_content", "raises": "error" }],
+      "expect": {
+        "sent": {
+          "generate_summary": {
+            "status": "ERROR",
+            "attributes": {
+              "gen_ai.operation.name": "generate_content"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown_operation_constructor_is_sent_as_given",
+      "case": "success",
+      "run": [{ "span": "odd", "operation": "constructor" }],
+      "expect": {
+        "sent": {
+          "odd": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "constructor"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "session_stamps_every_span",
+      "case": "success",
+      "run": [
+        {
+          "session": "conv-1042",
+          "children": [
+            { "agent": "support", "children": [{ "span": "answer", "operation": "model_call" }] }
+          ]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent support": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "support",
+              "gen_ai.agent.version": "r1",
+              "convergent.session.id": "conv-1042",
+              "convergent.invocation.span_id": "$span_id:invoke_agent support",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support"
+            }
+          },
+          "answer": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "chat",
+              "convergent.session.id": "conv-1042",
+              "convergent.invocation.span_id": "$span_id:invoke_agent support",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "context_attributes_mark_the_span_and_its_children",
+      "case": "success",
+      "run": [
+        {
+          "span": "search_docs",
+          "context_attributes": { "customer.id": "acme" },
+          "children": [{ "span": "rerank" }]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "search_docs": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "retrieval",
+              "convergent.attributes.customer.id": "acme"
+            }
+          },
+          "rerank": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "retrieval",
+              "convergent.attributes.customer.id": "acme"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "artifacts_listed",
+      "case": "success",
+      "run": [
+        {
+          "span": "read_invoice",
+          "artifacts": [
+            {
+              "role": "input",
+              "text": "invoice,total\n1042,20\n",
+              "filename": "invoices.csv",
+              "media_type": "text/csv",
+              "origin": "user"
+            },
+            {
+              "role": "output",
+              "text": "Paid in full.\n",
+              "filename": "receipt.txt",
+              "media_type": "text/plain",
+              "origin": "tool"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "read_invoice": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "retrieval",
+              "convergent.artifacts.input": [
+                {
+                  "digest": "sha256:21cdf2d5641d17fb6810b7efa435010791ea430dae97f2313addc450bb0d99e6",
+                  "size_bytes": 22,
+                  "media_type": "text/csv",
+                  "filename": "invoices.csv",
+                  "origin": "user"
+                }
+              ],
+              "convergent.artifacts.output": [
+                {
+                  "digest": "sha256:85ef805c2ca769bc267636ce08c84d05a58f7bc1211c12967981509b37efefa8",
+                  "size_bytes": 14,
+                  "media_type": "text/plain",
+                  "filename": "receipt.txt",
+                  "origin": "tool"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "artifacts_dropped",
+      "case": "success",
+      "run": [
+        {
+          "span": "read_scan",
+          "artifacts": [{ "role": "input", "text": "scan", "media_type": "image\tpng" }]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "read_scan": {
+            "status": "UNSET",
+            "attributes": {
+              "gen_ai.operation.name": "retrieval",
+              "convergent.artifacts.dropped": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "sibling_agent_invocation_stamps",
+      "case": "success",
+      "init": {
+        "agents": [
+          "billing-agent",
+          "shipping-agent"
+        ]
+      },
+      "run": [
+        {
+          "span": "handle-request",
+          "operation": "workflow",
+          "children": [
+            {
+              "agent": "billing-agent",
+              "children": [
+                {
+                  "span": "billing-agent.lookup",
+                  "operation": "tool_call"
+                },
+                {
+                  "span": "billing-agent.chat",
+                  "operation": "model_call",
+                  "attributes": {
+                    "gen_ai.request.model": "claude-sonnet-4-5",
+                    "gen_ai.usage.input_tokens": 400,
+                    "gen_ai.usage.output_tokens": 80
+                  }
+                }
+              ]
+            },
+            {
+              "agent": "shipping-agent",
+              "children": [
+                {
+                  "span": "shipping-agent.lookup",
+                  "operation": "tool_call"
+                },
+                {
+                  "span": "shipping-agent.chat",
+                  "operation": "model_call",
+                  "attributes": {
+                    "gen_ai.request.model": "claude-sonnet-4-5",
+                    "gen_ai.usage.input_tokens": 400,
+                    "gen_ai.usage.output_tokens": 80
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent billing-agent": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent billing-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent billing-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent billing-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent billing-agent",
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "billing-agent",
+              "gen_ai.agent.version": "r1"
+            }
+          },
+          "execute_tool billing-agent.lookup": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent billing-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent billing-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent billing-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent billing-agent",
+              "gen_ai.operation.name": "execute_tool",
+              "gen_ai.tool.name": "billing-agent.lookup",
+              "gen_ai.tool.type": "function"
+            }
+          },
+          "billing-agent.chat": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent billing-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent billing-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent billing-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent billing-agent",
+              "gen_ai.operation.name": "chat",
+              "gen_ai.request.model": "claude-sonnet-4-5",
+              "gen_ai.usage.input_tokens": 400,
+              "gen_ai.usage.output_tokens": 80
+            }
+          },
+          "invoke_agent shipping-agent": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent shipping-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent shipping-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent shipping-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent shipping-agent",
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "shipping-agent",
+              "gen_ai.agent.version": "r1"
+            }
+          },
+          "execute_tool shipping-agent.lookup": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent shipping-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent shipping-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent shipping-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent shipping-agent",
+              "gen_ai.operation.name": "execute_tool",
+              "gen_ai.tool.name": "shipping-agent.lookup",
+              "gen_ai.tool.type": "function"
+            }
+          },
+          "shipping-agent.chat": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent shipping-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent shipping-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent shipping-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent shipping-agent",
+              "gen_ai.operation.name": "chat",
+              "gen_ai.request.model": "claude-sonnet-4-5",
+              "gen_ai.usage.input_tokens": 400,
+              "gen_ai.usage.output_tokens": 80
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "nested_agent_invocation_stamps",
+      "case": "success",
+      "init": {
+        "agents": [
+          "orchestrator",
+          "researcher"
+        ]
+      },
+      "run": [
+        {
+          "agent": "orchestrator",
+          "children": [
+            {
+              "span": "lookup_order"
+            },
+            {
+              "agent": "researcher",
+              "children": [
+                {
+                  "span": "search_kb"
+                },
+                {
+                  "span": "fetch_article",
+                  "operation": "tool_call"
+                },
+                {
+                  "span": "researcher.chat",
+                  "operation": "model_call",
+                  "attributes": {
+                    "gen_ai.request.model": "claude-sonnet-4-5",
+                    "gen_ai.usage.input_tokens": 600,
+                    "gen_ai.usage.output_tokens": 80
+                  }
+                }
+              ]
+            },
+            {
+              "span": "orchestrator.chat",
+              "operation": "model_call",
+              "attributes": {
+                "gen_ai.request.model": "claude-sonnet-4-5",
+                "gen_ai.usage.input_tokens": 400,
+                "gen_ai.usage.output_tokens": 80
+              }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent orchestrator": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent orchestrator",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent orchestrator",
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "orchestrator",
+              "gen_ai.agent.version": "r1"
+            }
+          },
+          "lookup_order": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent orchestrator",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent orchestrator",
+              "gen_ai.operation.name": "retrieval"
+            }
+          },
+          "invoke_agent researcher": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent researcher",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent researcher",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent orchestrator",
+              "convergent.parent_invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "researcher",
+              "gen_ai.agent.version": "r1"
+            }
+          },
+          "search_kb": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent researcher",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent researcher",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent orchestrator",
+              "gen_ai.operation.name": "retrieval"
+            }
+          },
+          "execute_tool fetch_article": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent researcher",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent researcher",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent orchestrator",
+              "gen_ai.operation.name": "execute_tool",
+              "gen_ai.tool.name": "fetch_article",
+              "gen_ai.tool.type": "function"
+            }
+          },
+          "researcher.chat": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent researcher",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent researcher",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent orchestrator",
+              "gen_ai.operation.name": "chat",
+              "gen_ai.request.model": "claude-sonnet-4-5",
+              "gen_ai.usage.input_tokens": 600,
+              "gen_ai.usage.output_tokens": 80
+            }
+          },
+          "orchestrator.chat": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent orchestrator",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent orchestrator",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent orchestrator",
+              "gen_ai.operation.name": "chat",
+              "gen_ai.request.model": "claude-sonnet-4-5",
+              "gen_ai.usage.input_tokens": 400,
+              "gen_ai.usage.output_tokens": 80
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "late_framework_invocation_attribute_does_not_reanchor",
+      "case": "success",
+      "init": {
+        "agents": [
+          "support-agent"
+        ]
+      },
+      "run": [
+        {
+          "agent": "support-agent",
+          "children": [
+            {
+              "raw": "late LangChain chain",
+              "scope": "langchain",
+              "late_attributes": {
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.agent.name": "support-agent"
+              },
+              "children": [
+                {
+                  "raw": "late chain child",
+                  "scope": "langchain"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent support-agent": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent",
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "support-agent",
+              "gen_ai.agent.version": "r1"
+            }
+          },
+          "late LangChain chain": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent",
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "support-agent"
+            }
+          },
+          "late chain child": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "openinference_chain_marked_at_start_starts_no_run",
+      "case": "success",
+      "init": { "agents": ["support-agent"] },
+      "run": [
+        {
+          "agent": "support-agent",
+          "children": [
+            {
+              "raw": "LangChain chain",
+              "scope": "openinference.instrumentation.langchain",
+              "attributes": { "openinference.span.kind": "CHAIN" },
+              "children": [
+                { "raw": "chain step", "scope": "openinference.instrumentation.langchain" }
+              ]
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "sent": {
+          "invoke_agent support-agent": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent",
+              "gen_ai.operation.name": "invoke_agent",
+              "gen_ai.agent.name": "support-agent",
+              "gen_ai.agent.version": "r1"
+            }
+          },
+          "LangChain chain": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent",
+              "openinference.span.kind": "CHAIN"
+            }
+          },
+          "chain step": {
+            "status": "UNSET",
+            "attributes": {
+              "convergent.invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent",
+              "convergent.root_invocation.span_id": "$span_id:invoke_agent support-agent",
+              "convergent.root_invocation.start_time_unix_micros": "$start_time:invoke_agent support-agent"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

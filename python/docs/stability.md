@@ -11,11 +11,15 @@ applies from 0.0.5 on.
 
 The public API is what the [API reference](reference/api.md) documents:
 
-- The names `import convergent` exports, from `__version__` through `Note`.
+- The names `import convergent` exports, from `__version__` through
+  `propagator`.
   A test in the repository pins the exact list, so a release cannot drop or
   rename one silently.
 - The `convergent.otel` submodule with `install()` and
   `ConvergentSpanProcessor`.
+- The `convergent.carrier` submodule with `inject()` and `extract()`.
+- The `convergent.temporal` submodule with `TracingInterceptor`, installed with
+  the `temporal` extra.
 - The documented signatures of those calls: their keyword arguments, return
   types, and the exceptions the reference names.
 - The environment variables listed in
@@ -31,8 +35,8 @@ SemVer allows any change while the major version is 0. This SDK makes narrower
 promises:
 
 - A patch release (0.0.5 to 0.0.6) keeps the public API compatible. It fixes
-  bugs and updates documentation. The one exception is the session context-key
-  restriction in 0.0.9, described below.
+  bugs and updates documentation. The exceptions are the session context-key
+  restriction in 0.0.9 and the changes in 0.0.12, both described below.
 - A minor release (0.0.x to 0.1.0) may change or remove public API. The
   [changelog](https://github.com/convergent-technologies/convergent-sdk/blob/main/python/CHANGELOG.md)
   names every such change under the version that made it.
@@ -53,7 +57,7 @@ No names are deprecated today.
 ## What to pin
 
 ```text
-convergent-sdk>=0.0.11,<0.1
+convergent-sdk>=0.0.12,<0.1
 ```
 
 The upper bound keeps you on the 0.0.x line. Keep the exact version you test
@@ -61,6 +65,45 @@ in your lockfile, and read the release notes before you update it. `session()`
 and the agent configuration arguments require 0.0.9 or newer. File
 attachments (`input_artifact()` and `output_artifact()`) require 0.0.10 or
 newer. `model=` outside an agent run requires 0.0.11 or newer.
+`convergent.propagator()`, `convergent.carrier`, `init(session_hosts=...)`,
+and `convergent.temporal` require 0.0.12 or newer.
+
+## Upgrading to 0.0.12
+
+Version 0.0.12 changes what some spans carry. These changes are an exception to
+the patch-release compatibility policy:
+
+- `Status.deployment` is removed, and spans no longer carry the deployment
+  labels `init()` used to add. The release still rides every trace as
+  `service.version` and `gen_ai.agent.version`. `init()` no longer registers
+  a deployment, so it no longer waits on Convergent at startup, and it no
+  longer sends `OTEL_SERVICE_NAME` as deployment registration metadata.
+  It still maps `OTEL_SERVICE_NAME` to `service.name` on the spans it
+  exports.
+- Spans no longer carry `convergent.semantic.version` or
+  `convergent.execution.id`, including the framework spans your own
+  OpenTelemetry exporters receive. Convergent read neither one. If your own
+  backend groups by `convergent.execution.id`, group by trace id instead,
+  which held the same value. A `require_span_attributes` or
+  `reject_span_attributes` rule naming either key no longer matches.
+- `set_input()`, `set_output()`, and `tools=` drop a value that is not portable
+  JSON instead of recording its `repr`, and the first one logs a warning. A
+  pydantic model is recorded as `model_dump(mode="json")` gives it. Convert a
+  `datetime`, a dataclass, or another object first, such as `when.isoformat()`.
+  See
+  [the span handle](reference/api.md#span) for the full rule.
+- An empty or blank `model=` is no longer recorded as `gen_ai.request.model`,
+  and the first one logs a warning.
+- A span that ends with an exception or a cancellation no longer carries the
+  output `set_output()` recorded on it. The input and the span's status are
+  recorded as before. A decorated generator that its reader stops after a
+  chunk still keeps its output, as in 0.0.11. An async one whose `finally`
+  raises when the reader stops it now makes the reader's `aclose()` raise,
+  marks the span as an error, and drops the output. If you read
+  `gen_ai.output.messages` or `gen_ai.tool.call.result` from a failed span,
+  record it under a key of your own with `set_attribute()`, such as
+  `app.partial_output`. Convergent does not show that key as the span's
+  output. See [the span handle](reference/api.md#span) for the full rule.
 
 ## Upgrading from 0.0.8
 

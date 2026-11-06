@@ -21,26 +21,18 @@ from opentelemetry.sdk.trace.export import (
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import convergent
-from convergent import _core, _registry, _transport
+from convergent import _core, _transport
 
 
 @pytest.fixture(autouse=True)
 def reset_sdk(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("CONVERGENT_API_KEY", raising=False)
     monkeypatch.delenv("CONVERGENT_ENDPOINT", raising=False)
-    stub_registration(monkeypatch)
     _reset_otel()
     _core._reset_for_tests()
     yield
     _core._reset_for_tests()
     _reset_otel()
-
-
-def stub_registration(monkeypatch: pytest.MonkeyPatch, deployment_id: str = "dep_test") -> None:
-    """Keep init()'s deployment POST off the network for every unit test."""
-    monkeypatch.setattr(
-        _registry, "post_json", lambda *a, **k: {"deployment_id": deployment_id, "is_new": True}
-    )
 
 
 def _reset_otel() -> None:
@@ -108,13 +100,11 @@ def test_pydantic_spans_share_the_sdk_execution(
         "chat",
         "invoke_agent",
     }
-    assert len({item["convergent.execution.id"] for item in complete_attributes}) == 1
+    assert len({_trace_id(span) for span in spans}) == 1
     agent_attributes = next(
         item for item in complete_attributes if item["gen_ai.operation.name"] == "invoke_agent"
     )
     assert agent_attributes["gen_ai.agent.name"] == "demo"
-    trace_id = f"{_trace_id(spans[0]):032x}"
-    assert {item["convergent.execution.id"] for item in complete_attributes} == {trace_id}
 
 
 def test_observed_coordinator_and_instrumented_agent_share_execution(
@@ -147,9 +137,6 @@ def test_observed_coordinator_and_instrumented_agent_share_execution(
         span for span in spans if (span.attributes or {}).get("gen_ai.operation.name") is not None
     ]
     assert {_trace_id(span) for span in semantic_spans} == {_trace_id(semantic_spans[0])}
-    assert {(span.attributes or {})["convergent.execution.id"] for span in semantic_spans} == {
-        (semantic_spans[0].attributes or {})["convergent.execution.id"]
-    }
 
 
 def test_nested_agents_share_one_execution_and_get_the_release_stamped(
@@ -199,7 +186,6 @@ def test_nested_agents_share_one_execution_and_get_the_release_stamped(
         span for span in spans if (span.attributes or {}).get("gen_ai.operation.name") is not None
     ]
     assert len({_trace_id(span) for span in semantic_spans}) == 1
-    assert len({(span.attributes or {})["convergent.execution.id"] for span in semantic_spans}) == 1
     agent_spans = [
         span
         for span in semantic_spans
@@ -416,7 +402,6 @@ def test_init_identity_has_no_execution_resource_attribute(
     # Agent identity rides the span, so no Resource carries a name.
     assert "convergent.agent.name" not in resource
     assert resource["service.version"] == "a01dbef"
-    assert "convergent.execution.id" not in resource
 
 
 def test_the_exporter_compresses_by_default() -> None:
@@ -512,3 +497,119 @@ def test_an_unknown_compression_setting_falls_back_to_gzip(
     with caplog.at_level(logging.WARNING, logger="convergent.sdk"):
         assert _compression() is Compression.Gzip
     assert any("brotli" in record.getMessage() for record in caplog.records)
+
+
+#: litellm's ``otel`` callback, as it records one Responses API call with an
+#: image: the model call span holds the request messages in
+#: ``gen_ai.input.messages``, and its ``raw_gen_ai_request`` child repeats the
+#: whole request as Python reprs, one ``llm.<provider>.<field>`` per field.
+_LITELLM_IMAGE = "data:image/png;base64,iVBORw0KGgo="
+_LITELLM_USER_MESSAGE = {
+    "role": "user",
+    "parts": [
+        {"type": "input_text", "text": "What is in this picture?"},
+        {"type": "input_image", "image_url": _LITELLM_IMAGE},
+    ],
+}
+_LITELLM_RAW_REQUEST = {
+    "llm.openai.input": (
+        "[{'role': 'user', 'content': [{'type': 'input_text', 'text': 'What is in this picture?'}, "
+        f"{{'type': 'input_image', 'image_url': '{_LITELLM_IMAGE}'}}]}}]"
+    ),
+    "llm.openai.model": "gpt-5.5",
+    "llm.openai.tools": "[{'type': 'function', 'name': 'search'}]",
+    "llm.openai.stream": "False",
+}
+_WITHOUT_INPUT = {
+    "llm.openai.model": "gpt-5.5",
+    "llm.openai.tools": "[{'type': 'function', 'name': 'search'}]",
+    "llm.openai.stream": "False",
+}
+
+
+@pytest.mark.parametrize(
+    ("parent_scope", "parent_messages", "exported"),
+    (
+        # Catches an SDK that sends the copy: the request leaves the process twice.
+        pytest.param("litellm", [_LITELLM_USER_MESSAGE], _WITHOUT_INPUT, id="copied"),
+        # Which parents hold the copy whole is a case table shared with ingest's rule.
+        # These cases cover the exporter's wiring around it.
+        pytest.param("litellm", None, _LITELLM_RAW_REQUEST, id="parent-without-messages"),
+        pytest.param("app", [_LITELLM_USER_MESSAGE], _LITELLM_RAW_REQUEST, id="parent-not-litellm"),
+    ),
+)
+def test_litellm_request_messages_leave_the_process_once(
+    parent_scope: str, parent_messages: list[dict[str, Any]] | None, exported: dict[str, str]
+) -> None:
+    import json
+
+    with _collector(200) as collector:
+        convergent.init(
+            api_key="key",  # pragma: allowlist secret
+            endpoint=collector.endpoint,
+            release="r1",
+        )
+        provider = _core.active_provider()
+        assert provider is not None
+        # litellm ends the model call span before it opens the raw child.
+        call = provider.get_tracer(parent_scope).start_span("litellm_request")
+        if parent_messages is not None:
+            call.set_attribute("gen_ai.input.messages", json.dumps(parent_messages))
+        call.end()
+        raw = provider.get_tracer("litellm").start_span(
+            "raw_gen_ai_request", context=trace.set_span_in_context(call)
+        )
+        raw.set_attributes(_LITELLM_RAW_REQUEST)
+        raw.end()
+        result = convergent.flush(timeout_ms=5_000)
+
+    assert (result.ok, result.dropped) == (True, 0)
+    spans = {
+        span.name: span
+        for _, _, body in collector.batches
+        for resource in ExportTraceServiceRequest.FromString(gzip.decompress(body)).resource_spans
+        for scope in resource.scope_spans
+        for span in scope.spans
+    }
+    sent = spans["raw_gen_ai_request"]
+    attributes = {attr.key: attr.value.string_value for attr in sent.attributes}
+    # The export copy names the SDK on every span it sends; that key is no request copy.
+    assert attributes.pop("convergent.sdk.version").startswith("python/")
+    assert attributes == exported
+    assert sent.parent_span_id == spans["litellm_request"].span_id
+    assert sent.span_id == raw.get_span_context().span_id.to_bytes(8, "big")
+
+
+def test_a_span_whose_sdk_copy_fails_is_exported_as_it_came(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One span the SDK cannot copy costs only its version key: the batch still goes
+    out, that span as it came, and nothing is counted lost."""
+    real_stamp = _transport.trajectory_stamp
+
+    def stamp(span: ReadableSpan) -> Any:
+        if span.name == "cannot-copy":
+            raise RuntimeError("copy failed")
+        return real_stamp(span)
+
+    monkeypatch.setattr(_transport, "trajectory_stamp", stamp)
+    provider = TracerProvider()
+    tracer = provider.get_tracer("test")
+    spans = []
+    for name in ("first", "cannot-copy", "last"):
+        span = tracer.start_span(name)
+        span.end()
+        assert isinstance(span, ReadableSpan)
+        spans.append(span)
+    provider.shutdown()
+    inner = InMemorySpanExporter()
+    _transport.lost_spans()
+
+    result = _transport._LossCountingExporter(inner, None, None).export(spans)
+
+    assert result is SpanExportResult.SUCCESS
+    exported = {span.name: dict(span.attributes or {}) for span in inner.get_finished_spans()}
+    assert set(exported) == {"first", "cannot-copy", "last"}
+    assert "convergent.sdk.version" in exported["first"]
+    assert "convergent.sdk.version" not in exported["cannot-copy"]
+    assert _transport.lost_spans() == 0

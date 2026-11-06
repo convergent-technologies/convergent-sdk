@@ -30,7 +30,8 @@ logger = logging.getLogger("convergent.sdk")
 _DEFAULT_ENDPOINT = "https://ingest.convergent.dev"
 _FLAG_ON = ("1", "true", "yes", "on")
 _FLAG_OFF = ("0", "false", "no", "off")
-# What POST /v1/deployments accepts in its agents field.
+# Bounds on the agents allowlist, so a runaway list cannot make the filter's
+# per-span lookup or its log lines unbounded.
 _DECLARED_AGENT_LIMIT = 256
 _AGENT_NAME_LIMIT = 512
 
@@ -66,6 +67,8 @@ class _Config:
     policy: _policy.Policy | None = None
     # TracerProvider defines no __eq__, so this field compares by identity.
     tracer_provider: TracerProvider | None = None
+    # Lowercased hosts that may receive the session id on an outbound request.
+    session_hosts: frozenset[str] = frozenset()
 
 
 def _validated_config(
@@ -80,6 +83,7 @@ def _validated_config(
     tracer_provider: object,
     debug: object,
     strict: object,
+    session_hosts: object = None,
 ) -> _Config:
     """The configuration ``init()`` was asked for, or a raise naming what was wrong.
 
@@ -96,6 +100,7 @@ def _validated_config(
     given = _destinations_given(destinations)
     names = _agent_names(agents)
     policy = _resolved_policy(require_span_attributes, reject_span_attributes)
+    hosts = _session_hosts(session_hosts)
 
     _check_flag_env("CONVERGENT_DEBUG")
     _check_flag_env("CONVERGENT_STRICT")
@@ -117,7 +122,21 @@ def _validated_config(
         agents=names,
         policy=policy,
         tracer_provider=provider,
+        session_hosts=hosts,
     )
+
+
+def _session_hosts(hosts: object) -> frozenset[str]:
+    """The hosts that may receive the session id, lowercased; none when not given."""
+    if hosts is None:
+        return frozenset()
+    if isinstance(hosts, str | bytes) or not isinstance(hosts, Iterable):
+        raise TypeError(f"session_hosts takes a list of host names, got {_type_name(hosts)}")
+    given = tuple(hosts)
+    for host in given:
+        if not (isinstance(host, str) and host.strip()):
+            raise ValueError(f"session_hosts takes non-empty host name strings, got {host!r}")
+    return frozenset(host.strip().lower().rstrip(".") for host in given)
 
 
 def _processor_config(
@@ -317,8 +336,8 @@ def _check_endpoint(endpoint: str) -> None:
     """Reject an endpoint nothing could be sent to.
 
     Empty is not an endpoint at all, which is the file-only process. Anything else
-    has to be an address a request can be made to, because the same value
-    registers the deployment and receives every span.
+    has to be an address a request can be made to, because it receives every
+    span.
 
     The rejected value is not echoed. A key pasted into ``endpoint=`` or
     ``CONVERGENT_ENDPOINT`` by mistake is never a valid URL, so it would land in
@@ -381,16 +400,15 @@ def _agent_names(agents: object) -> tuple[str, ...] | None:
             raise ValueError("agents takes agent names and one of them is empty")
         if len(stripped) > _AGENT_NAME_LIMIT:
             raise ValueError(
-                f"agents takes names of at most {_AGENT_NAME_LIMIT} characters, which is "
-                f"what registration accepts, and one of them is {len(stripped)} long"
+                f"agents takes names of at most {_AGENT_NAME_LIMIT} characters, "
+                f"and one of them is {len(stripped)} long"
             )
         names.append(stripped)
 
     declared = tuple(dict.fromkeys(names))
     if len(declared) > _DECLARED_AGENT_LIMIT:
         raise ValueError(
-            f"agents takes at most {_DECLARED_AGENT_LIMIT} names, which is what "
-            f"registration accepts, and got {len(declared)}"
+            f"agents takes at most {_DECLARED_AGENT_LIMIT} names, and got {len(declared)}"
         )
     return declared
 

@@ -1,7 +1,8 @@
 import { context, createContextKey } from "@opentelemetry/api";
 import { reportOnce } from "./diagnostics.js";
+import { CONVERGENT_SESSION_ID } from "./telemetry-keys.js";
 
-export const sessionContextKey = createContextKey("convergent.session.id");
+export const sessionContextKey = createContextKey(CONVERGENT_SESSION_ID);
 
 export function session<T>(id: string, callback: () => T): T {
   const value = typeof id === "string" ? id.trim() : "";

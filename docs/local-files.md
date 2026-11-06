@@ -68,8 +68,8 @@ Every Convergent SDK writes the same format. Each line is one OTLP/JSON
 enums are integers, 64 bit numbers are strings, and default values are left
 out.
 
-Pass `release`. With no API key, no deployment is registered, so the release
-on each span is the only record of which version wrote it.
+Pass `release`. The release on each span is the only record of which version
+wrote it.
 
 ## Privacy
 

@@ -28,7 +28,7 @@ from opentelemetry import trace
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 import convergent
-from convergent import _artifacts, _core, _registry
+from convergent import _artifacts, _core
 
 _KEY = "k-artifacts"  # pragma: allowlist secret
 
@@ -48,6 +48,7 @@ class _Route:
     puts: list[_Put] = field(default_factory=list)
     held: dict[str, int] = field(default_factory=dict)
     batches: list[bytes] = field(default_factory=list)
+    batch_user_agents: list[str] = field(default_factory=list)
     # Status, headers, and an optional body for the next PUTs.
     answers: list[tuple[int, dict[str, str]] | tuple[int, dict[str, str], bytes]] = field(
         default_factory=list
@@ -76,7 +77,6 @@ class _Route:
 def route(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Route]:
     monkeypatch.delenv("CONVERGENT_API_KEY", raising=False)
     monkeypatch.delenv("CONVERGENT_ENDPOINT", raising=False)
-    monkeypatch.setattr(_registry, "post_json", lambda *a, **k: {"deployment_id": "dep_artifacts"})
     _reset_otel()
     _core._reset_for_tests()
     state = _Route()
@@ -84,6 +84,7 @@ def route(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Route]:
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             state.batches.append(self.rfile.read(int(self.headers["Content-Length"])))
+            state.batch_user_agents.append(self.headers["User-Agent"])
             self.send_response(200)
             self.end_headers()
 
@@ -390,7 +391,9 @@ def test_a_bare_404_or_409_drops_only_that_file_and_flush_reports_it(route: _Rou
     assert route.puts[-1].digest == _sha(b"still listed")
     assert "convergent.artifacts.input" in route.spans()["execute_tool later"]
     assert later_result.ok
-    assert route.puts[0].headers["User-Agent"].startswith("convergent-sdk-python/")
+    user_agent = route.puts[0].headers["User-Agent"]
+    assert user_agent.startswith("convergent-sdk-python/")
+    assert set(route.batch_user_agents) == {user_agent}
 
 
 def test_a_closed_queue_copies_no_files(route: _Route) -> None:

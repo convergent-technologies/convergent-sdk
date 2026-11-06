@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Filter scenarios",
+  "description": "The shape of scenarios.json beside this file. Every option key is named here, so an unknown or camelCase key fails. Label names, environment variables, payloads, and span names are free form.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["description", "nodes", "scenarios"],
+  "properties": {
+    "description": { "type": "string" },
+    "nodes": { "type": "object", "additionalProperties": { "type": "string" } },
+    "scenarios": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/scenario" } }
+  },
+  "$defs": {
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "run", "expect"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "destination": { "enum": ["file"] },
+        "init": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "agents": { "type": "array", "items": { "type": "string" } },
+            "require_span_attributes": { "type": "object" },
+            "reject_span_attributes": { "type": "object" }
+          }
+        },
+        "env": { "type": "object", "additionalProperties": { "type": "string" } },
+        "run": { "$ref": "#/$defs/nodes" },
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sent"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "sent": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "propertyNames": { "pattern": "^convergent\\.attributes\\." }
+              }
+            }
+          }
+        }
+      }
+    },
+    "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+    "node": {
+      "oneOf": [
+        { "$ref": "#/$defs/agent" },
+        { "$ref": "#/$defs/span" },
+        { "$ref": "#/$defs/wrapped" },
+        { "$ref": "#/$defs/raw" },
+        { "$ref": "#/$defs/remote" },
+        { "$ref": "#/$defs/set_context_attributes" },
+        { "$ref": "#/$defs/concurrent" },
+        { "$ref": "#/$defs/sleep" }
+      ]
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": { "type": "string" },
+        "attributes": { "type": "object" },
+        "context_attributes": { "type": "object" },
+        "children": { "$ref": "#/$defs/nodes" }
+      }
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["span"],
+      "properties": {
+        "span": { "type": "string" },
+        "operation": { "type": "string" },
+        "attributes": { "type": "object" },
+        "context_attributes": { "type": "object" },
+        "children": { "$ref": "#/$defs/nodes" }
+      }
+    },
+    "wrapped": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wrapped", "resolver", "args"],
+      "properties": {
+        "wrapped": { "type": "string" },
+        "operation": { "type": "string" },
+        "resolver": {
+          "oneOf": [
+            { "enum": ["throw", "async"] },
+            { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }
+          ]
+        },
+        "args": { "type": "array" },
+        "children": { "$ref": "#/$defs/nodes" }
+      }
+    },
+    "raw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw", "scope"],
+      "properties": {
+        "raw": { "type": "string" },
+        "scope": { "type": "string" },
+        "attributes": { "type": "object" },
+        "late_attributes": { "type": "object" },
+        "children": { "$ref": "#/$defs/nodes" }
+      }
+    },
+    "remote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["remote"],
+      "properties": {
+        "remote": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trace_id", "span_id"],
+          "properties": {
+            "trace_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+            "span_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" }
+          }
+        },
+        "children": { "$ref": "#/$defs/nodes" }
+      }
+    },
+    "set_context_attributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["set_context_attributes"],
+      "properties": { "set_context_attributes": { "type": "object" } }
+    },
+    "concurrent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["concurrent"],
+      "properties": { "concurrent": { "$ref": "#/$defs/nodes" } }
+    },
+    "sleep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sleep"],
+      "properties": { "sleep": { "type": "integer", "minimum": 0 } }
+    }
+  }
+}

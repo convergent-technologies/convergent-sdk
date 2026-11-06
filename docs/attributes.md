@@ -4,9 +4,11 @@ description: Attribute read order, accepted values, span kinds, and custom field
 ---
 
 Convergent reads the attributes on each span and its OpenTelemetry resource.
-The tables below list each field and the order Convergent reads its keys in.
+The read-order tables below list each field and the order Convergent reads its
+keys in.
 Each attribute name is a key your instrumentation can send, not an SDK
-argument. Both SDKs write the same attributes. For their recording methods, see
+argument. Both SDKs write the same attributes, listed in
+[Keys the SDKs write](#keys-the-sdks-write). For their recording methods, see
 the API reference for [Python](../python/docs/reference/api.md) or
 [TypeScript](../typescript/docs/reference/api.md).
 
@@ -412,9 +414,14 @@ also stays custom, as in the response-model example above.
 Recognized aliases that lose to an earlier key are not copied to custom. For
 example, valid `convergent.input_tokens=12` and `gen_ai.usage.input_tokens=99`
 record count `12`, with no custom copy of `99`. Convergent omits the SDK
-bookkeeping attributes `convergent.semantic.version` and
-`convergent.content.source`. It omits `convergent.execution.id` when it equals
-the span's trace ID.
+bookkeeping attribute `convergent.content.source`.
+
+Python SDKs up to 0.0.11 and TypeScript SDK 0.1.0 also write two labels that
+later releases dropped: `convergent.semantic.version`, and
+`convergent.execution.id` set to the span's trace id. The Python SDKs write
+them on framework spans too. Convergent omits `convergent.semantic.version`
+whatever its value or sender. It omits `convergent.execution.id` only when the
+value equals the span's trace id; any other value stays custom.
 
 ### What is not renamed
 
@@ -426,3 +433,45 @@ custom attributes. They do not supply input tokens or an agent name.
 ## Which spelling of each fact we read
 
 See [Attribute precedence](#attribute-precedence) for the ordered keys.
+
+## Keys the SDKs write
+
+Every `gen_ai.*` and `convergent.*` key both SDKs write themselves is listed
+below. Standard OpenTelemetry resource keys such as `service.version` are not
+listed. `json` is a value carried as string text:
+JSON-encoded, except that tool call arguments or a result you pass as a string
+stay that string. `where` says whether the
+key appears on spans, on the OpenTelemetry resource, or both. A key ending in
+`*` is a prefix: each [context attribute](span-filters.md) is written under it, as
+`convergent.attributes.<name>`.
+
+<!-- telemetry-registry:start -->
+| Key | Type | Where |
+| --- | --- | --- |
+| `gen_ai.operation.name` | string | span |
+| `gen_ai.agent.name` | string | span |
+| `gen_ai.agent.version` | string | span |
+| `gen_ai.tool.name` | string | span |
+| `gen_ai.tool.type` | string | span |
+| `gen_ai.tool.call.id` | string | span |
+| `gen_ai.tool.call.arguments` | json | span |
+| `gen_ai.tool.call.result` | json | span |
+| `gen_ai.input.messages` | json | span |
+| `gen_ai.output.messages` | json | span |
+| `gen_ai.request.model` | string | span |
+| `convergent.content.source` | string | span |
+| `convergent.session.id` | string | span |
+| `convergent.artifacts.input` | json | span |
+| `convergent.artifacts.output` | json | span |
+| `convergent.artifacts.dropped` | int | span |
+| `convergent.agent.tools` | json | span |
+| `convergent.agent.system_instructions` | string | span |
+| `convergent.invocation.span_id` | string | span |
+| `convergent.invocation.start_time_unix_micros` | int | span |
+| `convergent.root_invocation.span_id` | string | span |
+| `convergent.root_invocation.start_time_unix_micros` | int | span |
+| `convergent.parent_invocation.span_id` | string | span |
+| `convergent.invocation.stamp_failed` | boolean | span |
+| `convergent.sdk.version` | string | span |
+| `convergent.attributes.*` | prefix | span |
+<!-- telemetry-registry:end -->

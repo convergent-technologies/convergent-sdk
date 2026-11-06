@@ -32,7 +32,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import convergent
-from convergent import _core, _policy, _processors, _registry, _transport
+from convergent import _core, _policy, _processors, _transport
 
 
 def _built(
@@ -76,11 +76,6 @@ def start_sdk(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., InMemor
 
     def start(**kwargs: object) -> InMemorySpanExporter:
         exporter = InMemorySpanExporter()
-        monkeypatch.setattr(
-            _registry,
-            "post_json",
-            lambda *a, **k: {"deployment_id": "dep_test", "is_new": True},
-        )
         monkeypatch.setattr(
             _transport, "build_processor", lambda **_: SimpleSpanProcessor(exporter)
         )
@@ -1206,9 +1201,6 @@ def test_a_malformed_filter_with_strict_off_disables_tracing(
     build error into "no filter" would instead send every span."""
     monkeypatch.delenv("CONVERGENT_STRICT", raising=False)
     exporter = InMemorySpanExporter()
-    monkeypatch.setattr(
-        _registry, "post_json", lambda *a, **k: {"deployment_id": "dep_test", "is_new": True}
-    )
     monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(exporter))
 
     malformed: dict[str, Any] = {direction: {"customer.id": object()}}
@@ -1293,9 +1285,6 @@ def test_a_malformed_filter_variable_disables_tracing(
     monkeypatch.delenv("CONVERGENT_STRICT", raising=False)
     monkeypatch.setenv("CONVERGENT_REQUIRE_SPAN_ATTRIBUTES", "customer.id=acme")
     exporter = InMemorySpanExporter()
-    monkeypatch.setattr(
-        _registry, "post_json", lambda *a, **k: {"deployment_id": "dep_test", "is_new": True}
-    )
     monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(exporter))
 
     status = convergent.init(
@@ -1347,9 +1336,6 @@ def test_the_filter_leaves_the_callers_own_exporters_alone(
     provider.add_span_processor(SimpleSpanProcessor(theirs))
     trace.set_tracer_provider(provider)
 
-    monkeypatch.setattr(
-        _registry, "post_json", lambda *a, **k: {"deployment_id": "dep_1", "is_new": True}
-    )
     monkeypatch.setattr(_transport, "build_processor", lambda **_: SimpleSpanProcessor(ours))
     convergent.init(
         api_key="test-key",  # pragma: allowlist secret
@@ -1387,6 +1373,32 @@ def test_a_marked_child_of_an_unmarked_agent_span_is_sent(
                 pass
 
     assert _names(exporter) == {"marked child"}
+
+
+def test_a_declared_agent_under_a_dropped_span_inherits_its_marks(
+    start_sdk: Callable[..., InMemorySpanExporter],
+) -> None:
+    """The context stamper runs in front of the agent filter, so a span that
+    filter drops still carries its marks, and a declared agent started later
+    under it inherits them and is withheld by ``reject_span_attributes=``."""
+    exporter = start_sdk(
+        agents=["support-agent"], reject_span_attributes={"customer.id": ["initech"]}
+    )
+    provider = _core.active_provider()
+    assert provider is not None
+    tracer = provider.get_tracer("their.framework")
+
+    with _marked({"customer.id": "initech"}):
+        router = tracer.start_span("router")
+    agent = tracer.start_span(
+        "invoke_agent support-agent",
+        context=trace.set_span_in_context(router),
+        attributes={"gen_ai.agent.name": "support-agent"},
+    )
+    agent.end()
+    router.end()
+
+    assert _names(exporter) == set()
 
 
 def test_require_and_agents_together_must_both_pass(
@@ -1433,8 +1445,9 @@ def test_shutdown_reaches_every_destination() -> None:
 
 
 def test_wrap_returns_only_the_destination_chain() -> None:
-    """The stamper is one module-level instance both entry points register, so
-    ``wrap()`` returns only the filtered destination chain."""
+    """The context stamper is one module-level instance both entry points
+    register on the provider, so ``wrap()`` returns only the filtered destination
+    chain. The trajectory stamper sits inside that chain, behind the agent filter."""
     wrapped = _processors.wrap(None, ["support-agent"], [_Recorder()])
 
     assert len(wrapped) == 1
